@@ -881,9 +881,56 @@ function useSupabaseStrategies() {
 }
 
 // ============================================================
+// ✅ SUPABASE ACTIVITY LOG HOOK
+// ============================================================
+function useSupabaseActivityLog() {
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const load = async () => {
+      const { data, error } = await supabase
+        .from("activity_log")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (!error && data) setLogs(data);
+      setLoading(false);
+    };
+    load();
+
+    const ch = supabase
+      .channel("activity-log-sync")
+      .on("postgres_changes",
+        { event: "INSERT", schema: "public", table: "activity_log" },
+        (payload) => {
+          setLogs(prev => [payload.new, ...prev]);
+        }
+      )
+      .subscribe();
+
+    return () => supabase.removeChannel(ch);
+  }, []);
+
+  const addLog = useCallback(async ({ userId, userName, userRole, action, target, detail, category }) => {
+    await supabase.from("activity_log").insert([{
+      user_id:   userId,
+      user_name: userName,
+      user_role: userRole,
+      action,
+      target:    target  || "",
+      detail:    detail  || "",
+      category:  category|| "general",
+    }]);
+  }, []);
+
+  return { logs, loading, addLog };
+}
+
+// ============================================================
 // MANUAL DATA ENTRY PANEL
 // ============================================================
-function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides, dataEntries, setDataEntries }) {
+function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides, dataEntries, setDataEntries, addLog }) {
   const [targetType, setTargetType] = useState("station");
   const [selectedStation, setStation] = useState("");
   const [selectedZone, setZone] = useState("");
@@ -921,6 +968,8 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
       color:targetType==="station"?(NODES.find(n=>n.id===selectedStation)?.color||"#38bdf8"):"#38bdf8"
     }]);
     if (insertError) { setError("Məlumat qeydə alınmadı: " + insertError.message); return; }
+    addLog && addLog({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role,
+      action:"Məlumat daxil etdi", target:label, detail:`${fLabel}: ${numVal}`, category:"data" });
     setFieldValue(""); setNote(""); setSaved(true); setTimeout(()=>setSaved(false), 2500);
   };
 
@@ -1062,6 +1111,7 @@ export default function App() {
   const { alerts, setAlerts } = useSupabaseAlerts();
   const { dataEntries, setDataEntries } = useSupabaseDataEntries();
   const { strategies, setStrategies } = useSupabaseStrategies();
+  const { logs, loading: logsLoading, addLog } = useSupabaseActivityLog();
 
   const rawSensors = useSensors();
   const sensors = Object.fromEntries(NODES.map(n => [n.id, { ...rawSensors[n.id], ...(sensorOverrides[n.id]||{}) }]));
@@ -1116,11 +1166,22 @@ export default function App() {
     if (data.status==='blocked') return {ok:false,msg:"Hesabınız bloklanıb."};
     const normalizedRole = normalizeRole(data.role);
     const userName = data.full_name||data.name||data.username;
-    setCurrentUser({
+    const userObj = {
       ...data, id:data.id, name:userName, role:normalizedRole,
       serviceArea:data.service_region||"Bütün Ərazilər",
       avatar:userName.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()
-    });
+    };
+    setCurrentUser(userObj);
+    // Giriş logu
+    await supabase.from("activity_log").insert([{
+      user_id:   data.id,
+      user_name: userName,
+      user_role: normalizedRole,
+      action:    "Sistemə daxil oldu",
+      target:    "",
+      detail:    "",
+      category:  "auth",
+    }]);
     return {ok:true};
   };
 
@@ -1138,11 +1199,46 @@ export default function App() {
     } catch(err) { return {error:"Gözlənilməz xəta baş verdi."}; }
   };
 
-  const handleLogout = () => { setCurrentUser(null); setTab("overview"); };
+  // Mesaj göndərərkən loga yaz
+  const sendMessageWithLog = useCallback(async (params) => {
+    const result = await sendMessage(params);
+    if (!result.error) {
+      addLog({
+        userId:   params.currentUser.id,
+        userName: params.currentUser.name,
+        userRole: params.currentUser.role,
+        action:   params.isBroadcast ? "Broadcast mesaj göndərdi" : "Mesaj göndərdi",
+        target:   params.isBroadcast ? "Hamı" : (params.recipientName || ""),
+        detail:   params.subject,
+        category: "message",
+      });
+    }
+    return result;
+  }, [sendMessage, addLog]);
+
+  const handleLogout = async () => {
+    if (currentUser) {
+      await supabase.from("activity_log").insert([{
+        user_id:   currentUser.id,
+        user_name: currentUser.name,
+        user_role: currentUser.role,
+        action:    "Sistemdən çıxdı",
+        target:    "",
+        detail:    "",
+        category:  "auth",
+      }]);
+    }
+    setCurrentUser(null); setTab("overview");
+  };
 
   const removeAlert = async (id) => {
+    const alert = alerts.find(a=>a.id===id);
     await supabase.from('alerts').delete().eq('id',id);
     setAlerts(prev=>prev.filter(a=>a.id!==id));
+    if (currentUser && alert) {
+      addLog({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role,
+        action:"Hadisəni sildi", target:alert.node, detail:`${alert.component}: ${alert.message}`, category:"incident" });
+    }
   };
 
   const toggleNode = (id) => setSelNodeIds(prev=>prev.includes(id)?(prev.length>1?prev.filter(x=>x!==id):prev):[...prev,id]);
@@ -1169,7 +1265,8 @@ export default function App() {
     { k:"strategies", l:"Strategiyalar",  Icon:Leaf },
     { k:"incidents",  l:"Hadisələr",      Icon:AlertTriangle },
     { k:"messages",   l:"Mesajlar",       Icon:MessageSquare, badge:unreadMsgs },
-    ...(perms.canSeeAdminTab?[{k:"admin",l:"Admin",Icon:Crown,badge:pending.length}]:[])
+    ...(perms.canSeeAdminTab?[{k:"admin",l:"Admin",Icon:Crown,badge:pending.length}]:[]),
+    ...(perms.isAdmin?[{k:"activity",l:"Fəaliyyət",Icon:History}]:[])
   ];
 
   const card = (extra={}) => ({
@@ -1329,7 +1426,7 @@ export default function App() {
         {activeTab==="dataentry"&&(
           <div style={{display:"grid",gridTemplateColumns:"380px 1fr",gap:14}}>
             <div style={card()}>
-              <ManualDataEntryPanel currentUser={currentUser} perms={perms} sensors={sensors} setSensorOverrides={setSensorOverrides} dataEntries={dataEntries} setDataEntries={setDataEntries}/>
+              <ManualDataEntryPanel currentUser={currentUser} perms={perms} sensors={sensors} setSensorOverrides={setSensorOverrides} dataEntries={dataEntries} setDataEntries={setDataEntries} addLog={addLog}/>
             </div>
             <div style={card()}>
               <div style={{fontSize:"0.7rem",color:"#64748b",fontWeight:700,marginBottom:14,display:"flex",alignItems:"center",gap:6}}><Database size={13}/> MƏLUMAT GİRİŞ TARİXÇƏSİ</div>
@@ -1398,6 +1495,283 @@ export default function App() {
           </div>
         )}
 
+        {/* ADMIN PANEL */}
+        {activeTab==="admin"&&(
+          <div>
+            {!perms.canSeeAdminTab ? (
+              <PermissionBanner message="Bu bölməyə giriş üçün Administrator və ya Baş Müavin hüququ lazımdır."/>
+            ) : (
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+                {/* Gözləyən müraciətlər */}
+                <div style={card()}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+                    <div style={{width:8,height:8,borderRadius:"50%",background:"#f59e0b",boxShadow:"0 0 8px #f59e0b80"}}/>
+                    <h3 style={{color:"#f1f5f9",fontSize:"0.85rem",fontWeight:800,margin:0}}>Gözləyən Müraciətlər</h3>
+                    {pending.length>0&&<span style={{background:"#f59e0b",color:"#000",fontSize:"0.55rem",borderRadius:10,padding:"2px 7px",fontWeight:900,marginLeft:"auto"}}>{pending.length}</span>}
+                  </div>
+                  {pending.length===0?(
+                    <div style={{textAlign:"center",padding:"28px 0",color:"#334155",fontSize:"0.72rem"}}>
+                      <UserCheck size={24} style={{color:"#1e293b",marginBottom:8}}/>
+                      <div>Gözləyən müraciət yoxdur</div>
+                    </div>
+                  ):(
+                    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                      {pending.map(u=>{
+                        return (
+                          <div key={u.id} style={{background:"rgba(245,158,11,0.04)",border:"1px solid rgba(245,158,11,0.15)",borderRadius:10,padding:"12px 14px"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                              <div>
+                                <div style={{fontSize:"0.75rem",color:"#f1f5f9",fontWeight:800}}>{u.full_name||u.username}</div>
+                                <div style={{fontSize:"0.62rem",color:"#64748b",marginTop:2}}>{u.username} · {u.email}</div>
+                                <div style={{fontSize:"0.62rem",color:"#475569",marginTop:2,display:"flex",alignItems:"center",gap:6}}>
+                                  <RoleBadge role={normalizeRole(u.role)} size="xs"/>
+                                  <span>·</span>
+                                  <span>{u.service_region||"—"}</span>
+                                </div>
+                                {u.note&&<div style={{fontSize:"0.6rem",color:"#475569",marginTop:4,fontStyle:"italic",background:"rgba(255,255,255,0.03)",borderRadius:5,padding:"4px 8px"}}>"{u.note}"</div>}
+                              </div>
+                              <span style={{fontSize:"0.58rem",color:"#334155"}}>{relTime(u.created_at)}</span>
+                            </div>
+                            <div style={{display:"flex",gap:6}}>
+                              <button
+                                onClick={async()=>{
+                                  await supabase.from('users').update({status:'approved'}).eq('id',u.id);
+                                  setPending(prev=>prev.filter(p=>p.id!==u.id));
+                                  addLog({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role,
+                                    action:"İstifadəçini təsdiqledi", target:u.full_name||u.username,
+                                    detail:`Rol: ${normalizeRole(u.role)} · ${u.service_region||""}`, category:"admin" });
+                                }}
+                                style={{flex:1,padding:"7px",borderRadius:8,background:"rgba(16,185,129,0.12)",border:"1px solid rgba(16,185,129,0.3)",color:"#10b981",cursor:"pointer",fontSize:"0.65rem",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}
+                              >
+                                <UserCheck size={11}/>Təsdiqlə
+                              </button>
+                              <button
+                                onClick={async()=>{
+                                  await supabase.from('users').update({status:'rejected'}).eq('id',u.id);
+                                  setPending(prev=>prev.filter(p=>p.id!==u.id));
+                                  addLog({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role,
+                                    action:"İstifadəçini rədd etdi", target:u.full_name||u.username,
+                                    detail:`Rol: ${normalizeRole(u.role)} · ${u.service_region||""}`, category:"admin" });
+                                }}
+                                style={{flex:1,padding:"7px",borderRadius:8,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",cursor:"pointer",fontSize:"0.65rem",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}
+                              >
+                                <UserX size={11}/>Rədd Et
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Mövcud istifadəçilər */}
+                <div style={card()}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+                    <Users size={14} style={{color:"#38bdf8"}}/>
+                    <h3 style={{color:"#f1f5f9",fontSize:"0.85rem",fontWeight:800,margin:0}}>İstifadəçilər</h3>
+                    <span style={{fontSize:"0.6rem",color:"#334155",marginLeft:"auto"}}>{users.length} aktiv</span>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:480,overflowY:"auto"}}>
+                    {users.map(u=>{
+                      const rd = ROLES_DEF.find(r=>r.id===u.role)||ROLES_DEF[3];
+                      const isSelf = u.id === currentUser.id;
+                      return (
+                        <div key={u.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:"rgba(255,255,255,0.02)",borderRadius:9,border:`1px solid ${rd.color}15`}}>
+                          <div style={{width:30,height:30,borderRadius:8,background:`${rd.color}18`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.6rem",fontWeight:900,color:rd.color,flexShrink:0}}>
+                            {u.avatar}
+                          </div>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:"0.7rem",color:"#e2e8f0",fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
+                              {u.name}
+                              {isSelf&&<span style={{fontSize:"0.52rem",color:"#38bdf8",background:"rgba(56,189,248,0.1)",borderRadius:3,padding:"1px 5px"}}>Siz</span>}
+                            </div>
+                            <div style={{fontSize:"0.6rem",color:"#334155",marginTop:1,display:"flex",alignItems:"center",gap:6}}>
+                              <RoleBadge role={u.role} size="xs"/>
+                              <span>·</span>
+                              <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.serviceArea||"—"}</span>
+                            </div>
+                          </div>
+                          {!isSelf && perms.canManageOps && (
+                            <div style={{display:"flex",gap:4,flexShrink:0}}>
+                              {perms.canManageAdmins && (
+                                <select
+                                  value={u.role}
+                                  onChange={async(e)=>{
+                                    const newRole = e.target.value;
+                                    await supabase.from('users').update({role:newRole}).eq('id',u.id);
+                                    setUsers(prev=>prev.map(x=>x.id===u.id?{...x,role:newRole}:x));
+                                    addLog({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role,
+                                      action:"Rolu dəyişdi", target:u.name,
+                                      detail:`${u.role} → ${newRole}`, category:"admin" });
+                                  }}
+                                  style={{background:"rgba(6,12,28,0.95)",border:"1px solid rgba(56,189,248,0.2)",borderRadius:6,color:"#94a3b8",fontSize:"0.58rem",padding:"3px 5px",cursor:"pointer",outline:"none",fontFamily:"inherit"}}
+                                >
+                                  {ROLES_DEF.map(r=>(
+                                    <option key={r.id} value={r.id} style={{background:"#020610"}}>{r.label}</option>
+                                  ))}
+                                </select>
+                              )}
+                              <button
+                                onClick={async()=>{
+                                  const newStatus = u.status==='blocked'?'approved':'blocked';
+                                  await supabase.from('users').update({status:newStatus}).eq('id',u.id);
+                                  setUsers(prev=>prev.map(x=>x.id===u.id?{...x,status:newStatus}:x));
+                                  addLog({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role,
+                                    action: newStatus==='blocked'?"İstifadəçini blokladı":"İstifadəçinin blokunu açdı",
+                                    target:u.name, detail:"", category:"admin" });
+                                }}
+                                title={u.status==='blocked'?"Aktiv et":"Blokla"}
+                                style={{width:26,height:26,borderRadius:6,background:u.status==='blocked'?"rgba(16,185,129,0.08)":"rgba(239,68,68,0.06)",border:`1px solid ${u.status==='blocked'?"rgba(16,185,129,0.25)":"rgba(239,68,68,0.15)"}`,color:u.status==='blocked'?"#10b981":"#ef4444",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}
+                              >
+                                {u.status==='blocked'?<ShieldCheck size={10}/>:<ShieldOff size={10}/>}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ✅ FƏALİYYƏT JURNALI — yalnız admin */}
+        {activeTab==="activity"&&(
+          <div>
+            {!perms.isAdmin ? (
+              <PermissionBanner message="Bu bölməyə yalnız Administrator daxil ola bilər."/>
+            ) : (
+              <div>
+                {/* Başlıq + statistika */}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:18}}>
+                  {[
+                    { label:"Ümumi Qeyd",    value:logs.length,                                                  color:"#38bdf8", Icon:ClipboardList },
+                    { label:"Giriş/Çıxış",   value:logs.filter(l=>l.category==="auth").length,                  color:"#10b981", Icon:LogIn        },
+                    { label:"Məlumat Girişi", value:logs.filter(l=>l.category==="data").length,                  color:"#f59e0b", Icon:PenLine       },
+                    { label:"Admin Əməliyyat",value:logs.filter(l=>l.category==="admin").length,                 color:"#ef4444", Icon:Crown         },
+                    { label:"Mesaj",          value:logs.filter(l=>l.category==="message").length,               color:"#a78bfa", Icon:MessageSquare },
+                    { label:"Hadisə",         value:logs.filter(l=>l.category==="incident").length,              color:"#f97316", Icon:AlertTriangle },
+                  ].map(({label,value,color,Icon})=>(
+                    <div key={label} style={{...card(),display:"flex",gap:12,alignItems:"center",padding:14}}>
+                      <div style={{width:36,height:36,borderRadius:10,background:`${color}15`,border:`1px solid ${color}25`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                        <Icon size={16} style={{color}}/>
+                      </div>
+                      <div>
+                        <div style={{fontSize:"0.62rem",color:"#475569"}}>{label}</div>
+                        <div style={{fontSize:"1.1rem",fontWeight:900,color:"#f1f5f9",lineHeight:1.1}}>{value}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Log cədvəli */}
+                <div style={card()}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+                    <History size={14} style={{color:"#38bdf8"}}/>
+                    <h3 style={{color:"#f1f5f9",fontSize:"0.85rem",fontWeight:800,margin:0}}>Fəaliyyət Jurnalı</h3>
+                    <span style={{fontSize:"0.6rem",color:"#334155",marginLeft:"auto"}}>Son {logs.length} qeyd</span>
+                  </div>
+
+                  {logsLoading ? (
+                    <div style={{textAlign:"center",padding:"32px 0",display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:"#334155",fontSize:"0.72rem"}}>
+                      <RefreshCw size={14} style={{animation:"spin 1s linear infinite",color:"#38bdf8"}}/> Yüklənir...
+                    </div>
+                  ) : logs.length === 0 ? (
+                    <div style={{textAlign:"center",padding:"40px 0",color:"#334155",fontSize:"0.72rem"}}>
+                      <History size={28} style={{color:"#1e293b",marginBottom:10}}/>
+                      <div>Hələ heç bir fəaliyyət qeydə alınmayıb</div>
+                    </div>
+                  ) : (
+                    <div style={{display:"flex",flexDirection:"column",gap:0,maxHeight:600,overflowY:"auto"}}>
+                      {/* Cədvəl başlığı */}
+                      <div style={{display:"grid",gridTemplateColumns:"140px 130px 100px 1fr 1fr",gap:12,padding:"8px 14px",borderBottom:"1px solid rgba(56,189,248,0.1)",marginBottom:4}}>
+                        {["Tarix & Saat","İstifadəçi","Rol","Əməliyyat","Hədəf / Təfərrüat"].map(h=>(
+                          <div key={h} style={{fontSize:"0.58rem",color:"#334155",fontWeight:700,letterSpacing:"0.08em"}}>{h}</div>
+                        ))}
+                      </div>
+
+                      {logs.map((log, idx) => {
+                        const catColors = {
+                          auth:     "#10b981",
+                          data:     "#f59e0b",
+                          admin:    "#ef4444",
+                          message:  "#a78bfa",
+                          incident: "#f97316",
+                          general:  "#38bdf8",
+                        };
+                        const catColor = catColors[log.category] || "#38bdf8";
+                        const rd = ROLES_DEF.find(r=>r.id===normalizeRole(log.user_role)) || ROLES_DEF[3];
+                        const dt = new Date(log.created_at);
+                        const dateStr = dt.toLocaleDateString("az-AZ",{day:"2-digit",month:"2-digit",year:"numeric"});
+                        const timeStr = dt.toLocaleTimeString("az-AZ",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+                        const isEven = idx % 2 === 0;
+
+                        return (
+                          <div
+                            key={log.id}
+                            style={{
+                              display:"grid",
+                              gridTemplateColumns:"140px 130px 100px 1fr 1fr",
+                              gap:12,
+                              padding:"10px 14px",
+                              background: isEven ? "rgba(255,255,255,0.015)" : "transparent",
+                              borderBottom:"1px solid rgba(56,189,248,0.04)",
+                              alignItems:"center",
+                              transition:"background 0.15s",
+                            }}
+                            onMouseEnter={e=>e.currentTarget.style.background="rgba(56,189,248,0.04)"}
+                            onMouseLeave={e=>e.currentTarget.style.background=isEven?"rgba(255,255,255,0.015)":"transparent"}
+                          >
+                            {/* Tarix */}
+                            <div>
+                              <div style={{fontSize:"0.68rem",color:"#94a3b8",fontWeight:600}}>{dateStr}</div>
+                              <div style={{fontSize:"0.62rem",color:"#475569",marginTop:1,fontVariantNumeric:"tabular-nums"}}>{timeStr}</div>
+                            </div>
+
+                            {/* İstifadəçi */}
+                            <div style={{display:"flex",alignItems:"center",gap:6}}>
+                              <div style={{width:22,height:22,borderRadius:6,background:`${rd.color}18`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.52rem",fontWeight:900,color:rd.color,flexShrink:0}}>
+                                {(log.user_name||"??").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
+                              </div>
+                              <span style={{fontSize:"0.68rem",color:"#e2e8f0",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                                {log.user_name||"—"}
+                              </span>
+                            </div>
+
+                            {/* Rol */}
+                            <div>
+                              <RoleBadge role={normalizeRole(log.user_role)} size="xs"/>
+                            </div>
+
+                            {/* Əməliyyat */}
+                            <div style={{display:"flex",alignItems:"center",gap:6}}>
+                              <div style={{width:6,height:6,borderRadius:"50%",background:catColor,flexShrink:0,boxShadow:`0 0 5px ${catColor}80`}}/>
+                              <span style={{fontSize:"0.7rem",color:"#f1f5f9",fontWeight:700}}>{log.action}</span>
+                            </div>
+
+                            {/* Hədəf / Təfərrüat */}
+                            <div>
+                              {log.target && (
+                                <div style={{fontSize:"0.68rem",color:"#94a3b8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{log.target}</div>
+                              )}
+                              {log.detail && (
+                                <div style={{fontSize:"0.62rem",color:"#475569",marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontStyle:"italic"}}>{log.detail}</div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ✅ MESSAGES — hook prop-ları birbaşa ötürülür */}
         {activeTab==="messages"&&(
           <div style={card()}>
@@ -1407,7 +1781,7 @@ export default function App() {
               messages={messages}
               loading={msgLoading}
               markAsRead={markAsRead}
-              sendMessage={sendMessage}
+              sendMessage={sendMessageWithLog}
               deleteMessage={deleteMessage}
               perms={perms}
             />
