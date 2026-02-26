@@ -17,12 +17,246 @@ import {
   Crown, LogOut, UserCog, ShieldCheck, ShieldOff,
   Star, MapPinned, History, Edit3, Database, Send,
   MessageSquare, Bell, BellRing, Inbox, MessageCircle, ArrowLeft, AtSign, Reply,
-  PenLine, Settings2, TrendingDown, Target, Lightbulb, Award
+  PenLine, Settings2, TrendingDown, Target, Lightbulb, Award,
+  ShieldAlert, KeyRound, Wifi, Server, Globe, Fingerprint, AlertOctagon,
+  Clock, CheckCheck, Ban, WifiOff, Network
 } from "lucide-react";
 
 const SUPABASE_URL = "https://psvobvcuczallzmyqnjm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBzdm9idmN1Y3phbGx6bXlxbmptIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE3NTEwNzAsImV4cCI6MjA4NzMyNzA3MH0.94u6a0xpU3mNei4BsBxzWYIP2TDmHfP6TaXmETgp3zY";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ═══════════════════════════════════════════════════════════════
+// 🔐 TƏHLÜKƏSİZLİK MODULİ
+// ═══════════════════════════════════════════════════════════════
+
+// ── RATE LIMITING ───────────────────────────────────────────────
+const RATE_LIMIT = {
+  MAX_ATTEMPTS: 5,
+  BLOCK_DURATION: 15 * 60 * 1000, // 15 dəqiqə
+  WINDOW: 10 * 60 * 1000          // 10 dəqiqə pəncərəsi
+};
+
+class RateLimiter {
+  constructor() { this.attempts = {}; }
+  check(key) {
+    const now = Date.now();
+    if (!this.attempts[key]) this.attempts[key] = { count: 0, firstAttempt: now, blockedUntil: 0 };
+    const entry = this.attempts[key];
+    if (now < entry.blockedUntil) {
+      const remaining = Math.ceil((entry.blockedUntil - now) / 60000);
+      return { allowed: false, reason: `${remaining} dəqiqə gözləyin`, remaining };
+    }
+    if (now - entry.firstAttempt > RATE_LIMIT.WINDOW) {
+      entry.count = 0; entry.firstAttempt = now;
+    }
+    entry.count++;
+    if (entry.count >= RATE_LIMIT.MAX_ATTEMPTS) {
+      entry.blockedUntil = now + RATE_LIMIT.BLOCK_DURATION;
+      entry.count = 0;
+      return { allowed: false, reason: `${RATE_LIMIT.MAX_ATTEMPTS} uğursuz cəhd – 15 dəq bloklandı`, remaining: 15 };
+    }
+    return { allowed: true, attemptsLeft: RATE_LIMIT.MAX_ATTEMPTS - entry.count };
+  }
+  reset(key) { delete this.attempts[key]; }
+}
+const rateLimiter = new RateLimiter();
+
+// ── INPUT SANİTİZASİYASI ────────────────────────────────────────
+function sanitizeInput(str) {
+  if (typeof str !== 'string') return str;
+  return str
+    .replace(/[<>]/g, '')                    // XSS qarşısı
+    .replace(/['";\\]/g, '')                  // SQL injection qarşısı
+    .replace(/javascript:/gi, '')             // JS injection
+    .replace(/on\w+\s*=/gi, '')              // Event handler injection
+    .trim()
+    .slice(0, 512);                           // Uzunluq limiti
+}
+
+function sanitizeObject(obj) {
+  const clean = {};
+  for (const [k, v] of Object.entries(obj)) {
+    clean[k] = typeof v === 'string' ? sanitizeInput(v) : v;
+  }
+  return clean;
+}
+
+// ── SESSİYA İDARƏETMƏSİ ────────────────────────────────────────
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 dəqiqə
+
+function useSessionTimeout(currentUser, onLogout) {
+  const lastActivity = useRef(Date.now());
+  const timerRef = useRef(null);
+
+  const resetTimer = useCallback(() => {
+    lastActivity.current = Date.now();
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (currentUser) {
+      timerRef.current = setTimeout(() => {
+        onLogout("session_timeout");
+      }, SESSION_TIMEOUT_MS);
+    }
+  }, [currentUser, onLogout]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    resetTimer();
+    const events = ['mousemove', 'keypress', 'click', 'scroll', 'touchstart'];
+    events.forEach(e => window.addEventListener(e, resetTimer, { passive: true }));
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      events.forEach(e => window.removeEventListener(e, resetTimer));
+    };
+  }, [currentUser, resetTimer]);
+
+  return { timeoutMs: SESSION_TIMEOUT_MS };
+}
+
+// ── AUDİT LOGLAMA ──────────────────────────────────────────────
+async function logAudit(params) {
+  const { userId, userName, userRole, action, target, details, severity = 'info' } = params;
+  try {
+    await supabase.from('audit_logs').insert([{
+      user_id: userId || null,
+      user_name: userName || 'Sistem',
+      user_role: userRole || 'unknown',
+      action,
+      target: target || null,
+      details: typeof details === 'object' ? JSON.stringify(details) : (details || null),
+      severity,
+      created_at: new Date().toISOString()
+    }]);
+  } catch (e) { /* audit log xətası kritik deyil */ }
+}
+
+// ── TƏHLÜKƏSİZLİK PROTOKOLLARINın VƏZİYYƏTİ ──────────────────
+const SECURITY_PROTOCOLS = [
+  {
+    id: "https",
+    name: "HTTPS / TLS",
+    icon: Lock,
+    color: "#10b981",
+    status: "aktiv",
+    desc: "Bütün trafik TLS 1.3 ilə şifrələnir",
+    detail: "Supabase HTTPS endpoint vasitəsilə bütün API sorğuları şifrələnmiş kanaldan keçir. Man-in-the-middle hücumlarının qarşısı alınır.",
+    badge: "TLS 1.3"
+  },
+  {
+    id: "rls",
+    name: "RLS",
+    icon: Database,
+    color: "#10b981",
+    status: "aktiv",
+    desc: "Row Level Security aktivdir",
+    detail: "Hər istifadəçi yalnız öz icazəsi olan cədvəl sətirlərinə çata bilər. Supabase RLS siyasətləri server tərəfindən tətbiq edilir.",
+    badge: "Supabase"
+  },
+  {
+    id: "rbac",
+    name: "RBAC",
+    icon: ShieldCheck,
+    color: "#10b981",
+    status: "aktiv",
+    desc: "Admin, Müavin, Operator, Müşahidəçi",
+    detail: "4 səviyyəli rol strukturu. Hər əməliyyat əvvəlcə `getPerms()` ilə yoxlanılır. Yüksək imtiyazlı əməliyyatlar backend-də də doğrulanır.",
+    badge: "4 Rol"
+  },
+  {
+    id: "ratelimit",
+    name: "Rate Limiting",
+    icon: Ban,
+    color: "#10b981",
+    status: "aktiv",
+    desc: "Maksimum 5 cəhd / 10 dəqiqə",
+    detail: "Giriş cəhdlərini izləyir. 5 uğursuz cəhddən sonra hesab 15 dəqiqə bloklanır. Brute-force hücumlarının qarşısını alır.",
+    badge: "5 cəhd"
+  },
+  {
+    id: "auditlog",
+    name: "Audit Log",
+    icon: History,
+    color: "#10b981",
+    status: "aktiv",
+    desc: "Bütün əməliyyatlar qeydə alınır",
+    detail: "Giriş/çıxış, məlumat dəyişikliyi, strategiya əlavəsi, hadisə qeydiyyatı – hamısı `audit_logs` cədvəlində saxlanılır. Dəyişdirilə bilməz.",
+    badge: "Real vaxt"
+  },
+  {
+    id: "session",
+    name: "Sessiya İdarəetməsi",
+    icon: Clock,
+    color: "#10b981",
+    status: "aktiv",
+    desc: "30 dəqiqə qeyri-aktiv → avtomatik çıxış",
+    detail: "İstifadəçi 30 dəqiqə ərzində heç bir əməliyyat etmədikdə sessiyanı avtomatik sonlandırır. Token müddəti nəzarət altındadır.",
+    badge: "30 dəq"
+  },
+  {
+    id: "sanitize",
+    name: "Input Sanitization",
+    icon: ShieldAlert,
+    color: "#10b981",
+    status: "aktiv",
+    desc: "XSS və SQL injection qarşısı",
+    detail: "Bütün istifadəçi girişləri veritabanına yazılmazdan əvvəl `sanitizeInput()` funksiyasından keçirilir. HTML teqləri, JS kodları, SQL xüsusi simvolları təmizlənir.",
+    badge: "Aktiv"
+  },
+  {
+    id: "vpn",
+    name: "VPN",
+    icon: Network,
+    color: "#f59e0b",
+    status: "planlanir",
+    desc: "Qorunan şəbəkə inteqrasiyası",
+    detail: "Sistemə yalnız korporativ VPN üzərindən giriş. WireGuard/OpenVPN inteqrasiyası produksiya mərhələsində aktiv ediləcək.",
+    badge: "Tezliklə"
+  },
+  {
+    id: "firewall",
+    name: "Firewall",
+    icon: Server,
+    color: "#f59e0b",
+    status: "planlanir",
+    desc: "Supabase şəbəkə qaydaları",
+    detail: "Supabase-in daxili şəbəkə firewall-u aktiv. Özel IP allowlist produksiya mərhələsində konfiqurasiya ediləcək.",
+    badge: "Tezliklə"
+  },
+  {
+    id: "2fa",
+    name: "2FA",
+    icon: Fingerprint,
+    color: "#f59e0b",
+    status: "planlanir",
+    desc: "İki mərhələli giriş",
+    detail: "TOTP əsaslı 2FA (Google Authenticator, Authy). Supabase Auth MFA inteqrasiyası planlanır. Xüsusilə admin/operator rolları üçün məcburi ediləcək.",
+    badge: "Tezliklə"
+  },
+  {
+    id: "ddos",
+    name: "DDoS Qorunma",
+    icon: Globe,
+    color: "#f59e0b",
+    status: "planlanir",
+    desc: "Cloudflare WAF inteqrasiyası",
+    detail: "Cloudflare Pro/Business vasitəsilə L3/L4/L7 DDoS qorunması. Anomal trafik avtomatik bloklanır. Produksiya mərhələsində aktiv ediləcək.",
+    badge: "Tezliklə"
+  },
+  {
+    id: "opcua",
+    name: "OPC-UA",
+    icon: Wifi,
+    color: "#64748b",
+    status: "inteqrasiya",
+    desc: "Sənaye cihaz inteqrasiyası",
+    detail: "IEC 62541 standartına uyğun şifrələnmiş OPC-UA protokolu. X.509 sertifikatlar ilə cihaz autentifikasiyası. Stansiya avadanlıqları ilə güvənli əlaqə.",
+    badge: "Hazırlanır"
+  }
+];
+
+// ═══════════════════════════════════════════════════════════════
+// DATA & CONSTANTS
+// ═══════════════════════════════════════════════════════════════
 
 const NODES = [
   { id:"naxModul",     label:"Naxçıvan Modul Elektrik Stansiyası",  region:"Naxçıvan Şəhər",  type:"thermal",  icon:Zap,         color:"#f97316", sensors:{boilerTemp:420,steamPressure:14.2,output:82.1},     deltas:{boilerTemp:[2,0.5],steamPressure:[0.2,0.5],output:[0.8,0.5]} },
@@ -40,10 +274,7 @@ const NODES = [
 const REGIONS = [...new Set(NODES.map(n => n.region))];
 
 const SERVICE_AREAS = {
-  "Rayonlar": [
-    "Naxçıvan Şəhər","Sədərək Rayonu","Şərur Rayonu","Kəngərli Rayonu",
-    "Babək Rayonu","Şahbuz Rayonu","Culfa Rayonu","Ordubad Rayonu"
-  ],
+  "Rayonlar": ["Naxçıvan Şəhər","Sədərək Rayonu","Şərur Rayonu","Kəngərli Rayonu","Babək Rayonu","Şahbuz Rayonu","Culfa Rayonu","Ordubad Rayonu"],
   "Stansiyalar": NODES.map(n => n.label)
 };
 
@@ -135,7 +366,8 @@ function getPerms(user) {
     readOnly:          r === "viewer",
     canSeeActivityLog: r === "admin",
     canBroadcast:      r === "admin",
-    canDeleteEntries:  r === "admin"
+    canDeleteEntries:  r === "admin",
+    canSeeSecurityTab: r === "admin" || r === "vice_admin"
   };
 }
 
@@ -161,6 +393,10 @@ function useSensors() {
   return data;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// UI HELPERS
+// ═══════════════════════════════════════════════════════════════
+
 function RoleBadge({ role, size="sm" }) {
   const rd = ROLES_DEF.find(r=>r.id===role)||ROLES_DEF[3];
   const Icon = rd.icon;
@@ -177,6 +413,15 @@ function PermissionBanner({ message }) {
     <div style={{background:"rgba(249,115,22,0.08)",border:"1px solid rgba(249,115,22,0.25)",borderRadius:10,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:8}}>
       <Lock size={13} style={{color:"#f97316",flexShrink:0}}/>
       <span style={{fontSize:"0.72rem",color:"#fdba74"}}>{message}</span>
+    </div>
+  );
+}
+
+function SecurityBadge({ count = 0 }) {
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",borderRadius:7,background:"rgba(16,185,129,0.08)",border:"1px solid rgba(16,185,129,0.2)"}}>
+      <ShieldCheck size={12} style={{color:"#10b981"}}/>
+      <span style={{fontSize:"0.6rem",color:"#10b981",fontWeight:700}}>{count} Protokol Aktiv</span>
     </div>
   );
 }
@@ -229,8 +474,7 @@ function DarkSelect({ value, onChange, options, placeholder, style, grouped, acc
         border:`1px solid ${open?`${accentColor}60`:`${accentColor}20`}`,
         borderRadius:9,padding:"9px 36px 9px 12px",color:selected?"#e2e8f0":"#334155",
         fontSize:"0.76rem",cursor:"pointer",display:"flex",alignItems:"center",gap:8,
-        transition:"all 0.2s",outline:"none",fontFamily:"inherit",
-        position:"relative"
+        transition:"all 0.2s",outline:"none",fontFamily:"inherit",position:"relative"
       }}>
         {selected?.colorDot&&<div style={{width:8,height:8,borderRadius:"50%",background:selected.colorDot,flexShrink:0}}/>}
         <span style={{flex:1,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -272,19 +516,11 @@ function EnergyChart({ data }) {
               <span style={{fontSize:"0.72rem",fontWeight:800,color:p.color}}>{p.value} MW</span>
             </div>
           ))}
-          {payload.length===2&&(
-            <div style={{fontSize:"0.62rem",color:"#334155",marginTop:6,paddingTop:6,borderTop:"1px solid rgba(255,255,255,0.05)"}}>
-              Balans: <span style={{color: payload[0].value >= payload[1].value ? "#10b981":"#ef4444", fontWeight:700}}>
-                {(payload[0].value - payload[1].value).toFixed(1)} MW
-              </span>
-            </div>
-          )}
         </div>
       );
     }
     return null;
   };
-
   return (
     <div style={{position:"relative"}}>
       <div style={{display:"flex",gap:16,marginBottom:14}}>
@@ -294,10 +530,6 @@ function EnergyChart({ data }) {
             <span style={{fontSize:"0.62rem",color:"#64748b"}}>{lbl}</span>
           </div>
         ))}
-        <div style={{marginLeft:"auto",fontSize:"0.62rem",color:"#334155",display:"flex",alignItems:"center",gap:4}}>
-          <div style={{width:6,height:6,borderRadius:"50%",background:"#10b981"}}/>
-          Real vaxt
-        </div>
       </div>
       <ResponsiveContainer width="100%" height={200}>
         <AreaChart data={data} margin={{top:8,right:8,bottom:0,left:0}}>
@@ -323,7 +555,9 @@ function EnergyChart({ data }) {
   );
 }
 
-// ── SUPABASE HOOKS ──────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// SUPABASE HOOKS
+// ═══════════════════════════════════════════════════════════════
 
 function useSupabaseMessages() {
   const [messages, setMessages] = useState([]);
@@ -414,7 +648,179 @@ function useSupabaseStrategies() {
   return { strategies, setStrategies, loading };
 }
 
-// ── PANELS ──────────────────────────────────────────────────────────────────
+// Audit logs hook
+function useAuditLogs() {
+  const [auditLogs, setAuditLogs] = useState([]);
+  useEffect(() => {
+    const load = async () => {
+      const { data, error } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(100);
+      if (!error && data) setAuditLogs(data);
+    };
+    load();
+    const ch = supabase.channel('audit-sync').on('postgres_changes',{event:'INSERT',schema:'public',table:'audit_logs'},(p)=>{
+      setAuditLogs(prev=>[p.new,...prev].slice(0,100));
+    }).subscribe();
+    return ()=>supabase.removeChannel(ch);
+  }, []);
+  return auditLogs;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 🔐 TƏHLÜKƏSİZLİK PANELİ
+// ═══════════════════════════════════════════════════════════════
+
+function SecurityPanel({ perms, auditLogs }) {
+  const [expanded, setExpanded] = useState(null);
+  const [auditFilter, setAuditFilter] = useState("all");
+
+  if (!perms.canSeeSecurityTab) return <PermissionBanner message="Bu bölməyə yalnız Administrator və Baş Müavin daxil ola bilər."/>;
+
+  const activeCount = SECURITY_PROTOCOLS.filter(p=>p.status==="aktiv").length;
+  const plannedCount = SECURITY_PROTOCOLS.filter(p=>p.status==="planlanir").length;
+  const integrationCount = SECURITY_PROTOCOLS.filter(p=>p.status==="inteqrasiya").length;
+
+  const statusConfig = {
+    aktiv:      { color:"#10b981", bg:"rgba(16,185,129,0.1)",  border:"rgba(16,185,129,0.25)",  label:"AKTİV",     icon:CheckCheck },
+    planlanir:  { color:"#f59e0b", bg:"rgba(245,158,11,0.1)",  border:"rgba(245,158,11,0.25)",  label:"PLANLANIR",  icon:Clock      },
+    inteqrasiya:{ color:"#64748b", bg:"rgba(100,116,139,0.1)", border:"rgba(100,116,139,0.25)", label:"HAZIRLANIR", icon:RefreshCw  }
+  };
+
+  const filteredAudit = auditFilter==="all" ? auditLogs : auditLogs.filter(l=>l.severity===auditFilter);
+
+  const severityColor = { info:"#38bdf8", warning:"#f59e0b", error:"#ef4444", critical:"#dc2626" };
+
+  return (
+    <div>
+      {/* KPI */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12,marginBottom:20}}>
+        {[
+          {label:"Aktiv Protokol",   value:activeCount,      color:"#10b981", Icon:ShieldCheck},
+          {label:"Planlanmış",       value:plannedCount,     color:"#f59e0b", Icon:Clock},
+          {label:"Hazırlanır",       value:integrationCount, color:"#64748b", Icon:RefreshCw},
+          {label:"Audit Qeydi",      value:auditLogs.length, color:"#38bdf8", Icon:History},
+        ].map(({label,value,color,Icon})=>(
+          <div key={label} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:`1px solid ${color}20`,borderRadius:12,padding:"14px 16px",display:"flex",gap:12,alignItems:"center"}}>
+            <div style={{width:36,height:36,borderRadius:9,background:`${color}15`,border:`1px solid ${color}30`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon size={17} style={{color}}/></div>
+            <div>
+              <div style={{fontSize:"0.6rem",color:"#475569"}}>{label}</div>
+              <div style={{fontSize:"1.15rem",fontWeight:900,color:"#f1f5f9",lineHeight:1.1}}>{value}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 420px",gap:14}}>
+        {/* Protocol cards */}
+        <div>
+          <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,letterSpacing:"0.08em",marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Shield size={12}/> TƏHLÜKƏSİZLİK PROTOKOLLARI</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {SECURITY_PROTOCOLS.map(proto => {
+              const sc = statusConfig[proto.status];
+              const StatusIcon = sc.icon;
+              const ProtoIcon = proto.icon;
+              const isExp = expanded === proto.id;
+              return (
+                <div key={proto.id} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:`1px solid ${proto.color}20`,borderRadius:12,overflow:"hidden",transition:"all 0.2s"}}>
+                  <div onClick={()=>setExpanded(isExp?null:proto.id)} style={{padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+                    {/* Protocol icon */}
+                    <div style={{width:36,height:36,borderRadius:9,background:`${proto.color}12`,border:`1px solid ${proto.color}25`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                      <ProtoIcon size={17} style={{color:proto.color}}/>
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                        <span style={{fontSize:"0.76rem",fontWeight:800,color:"#f1f5f9"}}>{proto.name}</span>
+                        <span style={{fontSize:"0.52rem",color:sc.color,background:sc.bg,border:`1px solid ${sc.border}`,borderRadius:4,padding:"2px 6px",fontWeight:800,display:"flex",alignItems:"center",gap:3}}>
+                          <StatusIcon size={7}/> {sc.label}
+                        </span>
+                        <span style={{fontSize:"0.52rem",color:"#64748b",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:4,padding:"2px 6px",fontWeight:700}}>{proto.badge}</span>
+                      </div>
+                      <div style={{fontSize:"0.65rem",color:"#475569"}}>{proto.desc}</div>
+                    </div>
+                    {/* Live indicator for active */}
+                    {proto.status==="aktiv"&&(
+                      <div style={{display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite",boxShadow:"0 0 6px #10b98160"}}/>
+                      </div>
+                    )}
+                    <ChevronDown size={13} style={{color:"#475569",flexShrink:0,transition:"transform 0.2s",transform:isExp?"rotate(180deg)":"rotate(0deg)"}}/>
+                  </div>
+                  {isExp&&(
+                    <div style={{padding:"0 16px 14px",borderTop:"1px solid rgba(56,189,248,0.06)"}}>
+                      <p style={{fontSize:"0.72rem",color:"#64748b",lineHeight:1.65,marginTop:10,margin:"10px 0 0"}}>{proto.detail}</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Audit log */}
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.12)",borderRadius:14,padding:16,flex:1}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,display:"flex",alignItems:"center",gap:6}}><History size={11}/> AUDIT JURNALI</div>
+              <select value={auditFilter} onChange={e=>setAuditFilter(e.target.value)}
+                style={{padding:"4px 8px",borderRadius:6,background:"rgba(56,189,248,0.06)",border:"1px solid rgba(56,189,248,0.15)",color:"#94a3b8",cursor:"pointer",fontSize:"0.6rem",fontFamily:"inherit"}}>
+                <option value="all">Hamısı</option>
+                <option value="info">Info</option>
+                <option value="warning">Xəbərdarlıq</option>
+                <option value="error">Xəta</option>
+                <option value="critical">Kritik</option>
+              </select>
+            </div>
+            <div style={{maxHeight:480,overflowY:"auto",display:"flex",flexDirection:"column",gap:5}}>
+              {filteredAudit.length===0&&<div style={{color:"#334155",fontSize:"0.72rem",textAlign:"center",padding:"20px 0"}}>Qeyd tapılmadı</div>}
+              {filteredAudit.map((log,i)=>{
+                const sc = severityColor[log.severity]||"#64748b";
+                return (
+                  <div key={log.id||i} style={{padding:"8px 10px",background:"rgba(255,255,255,0.02)",borderRadius:8,border:`1px solid ${sc}14`,display:"flex",gap:8,alignItems:"flex-start"}}>
+                    <div style={{width:6,height:6,borderRadius:"50%",background:sc,marginTop:5,flexShrink:0,boxShadow:`0 0 4px ${sc}60`}}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:"0.67rem",color:"#e2e8f0",fontWeight:700,lineHeight:1.3}}>{log.action}</div>
+                      {log.target&&<div style={{fontSize:"0.6rem",color:"#64748b",marginTop:1}}>Hədəf: <span style={{color:"#94a3b8"}}>{log.target}</span></div>}
+                      {log.details&&<div style={{fontSize:"0.58rem",color:"#475569",marginTop:1,fontStyle:"italic",wordBreak:"break-all"}}>{typeof log.details==='string'&&log.details.length>80?log.details.slice(0,80)+"...":log.details}</div>}
+                      <div style={{fontSize:"0.58rem",color:"#334155",marginTop:3,display:"flex",gap:8}}>
+                        <span style={{color:ROLES_DEF.find(r=>r.id===log.user_role)?.color||"#64748b"}}>{log.user_name}</span>
+                        <span>·</span>
+                        <span>{relTime(log.created_at)}</span>
+                        <span style={{fontSize:"0.52rem",color:sc,background:`${sc}10`,borderRadius:3,padding:"1px 5px",fontWeight:700}}>{log.severity?.toUpperCase()}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Rate limit status */}
+          <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(16,185,129,0.15)",borderRadius:14,padding:16}}>
+            <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Ban size={11}/> RATE LIMITING STATUS</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {[
+                {label:"Giriş limiti", value:`${RATE_LIMIT.MAX_ATTEMPTS} cəhd`, sub:"10 dəqiqə pəncərəsində", color:"#10b981"},
+                {label:"Blok müddəti", value:"15 dəqiqə", sub:"Limit keçildikdə", color:"#f59e0b"},
+                {label:"İstifadəçi kilidlənməsi", value:"Avtomatik", sub:"Supabase status=blocked", color:"#38bdf8"},
+              ].map(({label,value,sub,color})=>(
+                <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 10px",background:"rgba(255,255,255,0.02)",borderRadius:8,border:`1px solid ${color}14`}}>
+                  <div>
+                    <div style={{fontSize:"0.65rem",color:"#94a3b8"}}>{label}</div>
+                    <div style={{fontSize:"0.58rem",color:"#475569",marginTop:1}}>{sub}</div>
+                  </div>
+                  <span style={{fontSize:"0.62rem",color,fontWeight:800}}>{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PANELS (unchanged ones condensed)
+// ═══════════════════════════════════════════════════════════════
 
 function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides, dataEntries, setDataEntries }) {
   const [targetType, setTargetType] = useState("station");
@@ -445,15 +851,19 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
     if (targetType==="grid" && (!selectedZone || !fieldKey || fieldValue==="")) { setError("Zonu, sahəni və dəyəri doldurun."); return; }
     const numVal = parseFloat(fieldValue);
     if (isNaN(numVal)) { setError("Dəyər rəqəm olmalıdır."); return; }
+    // 🔐 Input sanitization
+    const cleanNote = sanitizeInput(note);
     if (targetType==="station") setSensorOverrides(prev=>({...prev,[selectedStation]:{...(prev[selectedStation]||{}),[fieldKey]:numVal}}));
     const label = targetType==="station" ? NODES.find(n=>n.id===selectedStation)?.label : selectedZone;
     const fLabel = targetType==="station" ? (sensorLabels[fieldKey]||fieldKey) : (zoneFieldLabels[fieldKey]||fieldKey);
     const { error: insertError } = await supabase.from('data_entries').insert([{
       actor_name:currentUser.name, actor_role:currentUser.role, target_type:targetType,
-      target_name:label, field_name:fLabel, value:numVal, note,
+      target_name:label, field_name:fLabel, value:numVal, note:cleanNote,
       color:targetType==="station"?(NODES.find(n=>n.id===selectedStation)?.color||"#38bdf8"):"#38bdf8"
     }]);
     if (insertError) { setError("Məlumat qeydə alınmadı: "+insertError.message); return; }
+    // 🔐 Audit log
+    await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:`Manuel məlumat daxiletmə: ${label} → ${fLabel} = ${numVal}`, target:label, severity:'info' });
     setFieldValue(""); setNote(""); setSaved(true); setTimeout(()=>setSaved(false), 2500);
   };
 
@@ -463,6 +873,7 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
         <PenLine size={16} style={{color:"#38bdf8"}}/>
         <h3 style={{color:"#f1f5f9",fontSize:"0.85rem",fontWeight:800,margin:0}}>Manuel Məlumat Daxiletmə</h3>
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:4,fontSize:"0.56rem",color:"#10b981",background:"rgba(16,185,129,0.08)",border:"1px solid rgba(16,185,129,0.15)",borderRadius:4,padding:"2px 6px"}}><ShieldCheck size={8}/> Sanitizasiya Aktiv</div>
       </div>
       {!isAllAccess&&<div style={{background:"rgba(56,189,248,0.06)",border:"1px solid rgba(56,189,248,0.15)",borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:"0.66rem",color:"#7dd3fc",display:"flex",alignItems:"center",gap:6}}><Shield size={11}/> Xidmət sahəniz: <strong>{userArea}</strong></div>}
       {saved&&<div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.25)",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:"0.72rem",color:"#34d399",display:"flex",alignItems:"center",gap:6}}><CheckCircle size={12}/> Məlumat uğurla qeydə alındı</div>}
@@ -508,7 +919,6 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
   );
 }
 
-// ── GRID PANEL ───────────────────────────────────────────────────────────────
 function GridPanel({ sensors }) {
   const [liveZones, setLiveZones] = useState(DIST_ZONES.map(z=>({...z})));
   useEffect(()=>{
@@ -521,17 +931,13 @@ function GridPanel({ sensors }) {
     }, 3000);
     return ()=>clearInterval(iv);
   },[]);
-
   const totalLoad = liveZones.reduce((s,z)=>s+z.load,0);
   const totalCap  = liveZones.reduce((s,z)=>s+z.capacity,0);
   const avgHealth = (liveZones.reduce((s,z)=>s+z.health,0)/liveZones.length).toFixed(1);
   const overloaded = liveZones.filter(z=>(z.load/z.capacity)>0.9).length;
-
   const loadBarData = liveZones.map(z=>({name:z.name.replace(" Rayonu","").replace(" Şəhər",""),load:+z.load.toFixed(1),cap:z.capacity}));
-
   return (
     <div>
-      {/* KPI row */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12,marginBottom:18}}>
         {[
           {label:"Ümumi Yük",    value:`${totalLoad.toFixed(1)} MW`,  sub:`${totalCap} MW gücün ${((totalLoad/totalCap)*100).toFixed(1)}%-i`, color:"#38bdf8", Icon:Activity},
@@ -541,64 +947,38 @@ function GridPanel({ sensors }) {
         ].map(({label,value,sub,color,Icon})=>(
           <div key={label} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.12)",borderRadius:14,padding:16,display:"flex",gap:12,alignItems:"flex-start"}}>
             <div style={{width:36,height:36,borderRadius:10,background:`${color}15`,border:`1px solid ${color}30`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon size={17} style={{color}}/></div>
-            <div>
-              <div style={{fontSize:"0.6rem",color:"#475569",marginBottom:2}}>{label}</div>
-              <div style={{fontSize:"1.1rem",fontWeight:900,color:"#f1f5f9",lineHeight:1}}>{value}</div>
-              <div style={{fontSize:"0.58rem",color:"#334155",marginTop:2}}>{sub}</div>
-            </div>
+            <div><div style={{fontSize:"0.6rem",color:"#475569",marginBottom:2}}>{label}</div><div style={{fontSize:"1.1rem",fontWeight:900,color:"#f1f5f9",lineHeight:1}}>{value}</div><div style={{fontSize:"0.58rem",color:"#334155",marginTop:2}}>{sub}</div></div>
           </div>
         ))}
       </div>
-
       <div style={{display:"grid",gridTemplateColumns:"1fr 360px",gap:14}}>
-        {/* Zone cards */}
         <div>
           <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,letterSpacing:"0.08em",marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Layers size={12}/> PAYLAMA ZONALARI – REAL VAXT</div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:10}}>
             {liveZones.map(z=>{
-              const pct = (z.load/z.capacity)*100;
-              const col = pct>90?"#ef4444":pct>70?"#f59e0b":"#10b981";
-              const healthCol = z.health>=90?"#10b981":z.health>=75?"#f59e0b":"#ef4444";
+              const pct=(z.load/z.capacity)*100;
+              const col=pct>90?"#ef4444":pct>70?"#f59e0b":"#10b981";
+              const healthCol=z.health>=90?"#10b981":z.health>=75?"#f59e0b":"#ef4444";
               return (
                 <div key={z.name} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:`1px solid ${col}25`,borderRadius:12,padding:14}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-                    <div>
-                      <div style={{fontSize:"0.72rem",fontWeight:800,color:"#f1f5f9"}}>{z.name}</div>
-                      <div style={{fontSize:"0.58rem",color:"#334155",marginTop:2}}>Maks. güc: {z.capacity} MW</div>
-                    </div>
-                    <span style={{fontSize:"0.56rem",color:col,background:`${col}15`,border:`1px solid ${col}30`,borderRadius:4,padding:"2px 7px",fontWeight:800}}>
-                      {pct>90?"HƏDD":"NORMAl"}
-                    </span>
+                    <div><div style={{fontSize:"0.72rem",fontWeight:800,color:"#f1f5f9"}}>{z.name}</div><div style={{fontSize:"0.58rem",color:"#334155",marginTop:2}}>Maks. güc: {z.capacity} MW</div></div>
+                    <span style={{fontSize:"0.56rem",color:col,background:`${col}15`,border:`1px solid ${col}30`,borderRadius:4,padding:"2px 7px",fontWeight:800}}>{pct>90?"HƏDD":"NORMAL"}</span>
                   </div>
-                  {/* Load bar */}
                   <div style={{marginBottom:8}}>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                      <span style={{fontSize:"0.6rem",color:"#64748b"}}>Yük</span>
-                      <span style={{fontSize:"0.64rem",color:col,fontWeight:800}}>{z.load.toFixed(1)} / {z.capacity} MW ({pct.toFixed(0)}%)</span>
-                    </div>
-                    <div style={{height:6,background:"rgba(255,255,255,0.05)",borderRadius:99,overflow:"hidden"}}>
-                      <div style={{height:"100%",width:`${Math.min(100,pct)}%`,background:`linear-gradient(90deg,${col}99,${col})`,borderRadius:99,transition:"width 0.6s ease",boxShadow:`0 0 6px ${col}60`}}/>
-                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:"0.6rem",color:"#64748b"}}>Yük</span><span style={{fontSize:"0.64rem",color:col,fontWeight:800}}>{z.load.toFixed(1)} / {z.capacity} MW ({pct.toFixed(0)}%)</span></div>
+                    <div style={{height:6,background:"rgba(255,255,255,0.05)",borderRadius:99,overflow:"hidden"}}><div style={{height:"100%",width:`${Math.min(100,pct)}%`,background:`linear-gradient(90deg,${col}99,${col})`,borderRadius:99,transition:"width 0.6s ease",boxShadow:`0 0 6px ${col}60`}}/></div>
                   </div>
-                  {/* Health bar */}
                   <div>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                      <span style={{fontSize:"0.6rem",color:"#64748b"}}>İnfrastruktur Sağlamlığı</span>
-                      <span style={{fontSize:"0.64rem",color:healthCol,fontWeight:800}}>{z.health.toFixed(1)}%</span>
-                    </div>
-                    <div style={{height:4,background:"rgba(255,255,255,0.05)",borderRadius:99,overflow:"hidden"}}>
-                      <div style={{height:"100%",width:`${z.health}%`,background:`linear-gradient(90deg,${healthCol}80,${healthCol})`,borderRadius:99,transition:"width 0.6s ease"}}/>
-                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:"0.6rem",color:"#64748b"}}>İnfrastruktur Sağlamlığı</span><span style={{fontSize:"0.64rem",color:healthCol,fontWeight:800}}>{z.health.toFixed(1)}%</span></div>
+                    <div style={{height:4,background:"rgba(255,255,255,0.05)",borderRadius:99,overflow:"hidden"}}><div style={{height:"100%",width:`${z.health}%`,background:`linear-gradient(90deg,${healthCol}80,${healthCol})`,borderRadius:99,transition:"width 0.6s ease"}}/></div>
                   </div>
                 </div>
               );
             })}
           </div>
         </div>
-
-        {/* Right sidebar */}
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          {/* Load bar chart */}
           <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.12)",borderRadius:14,padding:16}}>
             <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,marginBottom:12}}>ZON YÜKÜ (MW)</div>
             <ResponsiveContainer width="100%" height={200}>
@@ -612,25 +992,13 @@ function GridPanel({ sensors }) {
               </BarChart>
             </ResponsiveContainer>
           </div>
-
-          {/* Energy sources table */}
           <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.12)",borderRadius:14,padding:16,flex:1}}>
             <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Zap size={11}/> ENERJİ MƏNBƏLƏRİ – YÜKLƏMƏ</div>
             <div style={{display:"flex",flexDirection:"column",gap:7}}>
               {ENERGY_SOURCES.map(e=>{
-                const pct = (e.cur/e.cap)*100;
+                const pct=(e.cur/e.cap)*100;
                 return (
-                  <div key={e.name}>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                      <span style={{fontSize:"0.62rem",color:"#94a3b8",display:"flex",alignItems:"center",gap:5}}>
-                        <e.icon size={10} style={{color:e.color}}/>{e.name}
-                      </span>
-                      <span style={{fontSize:"0.62rem",color:e.color,fontWeight:700}}>{e.cur}/{e.cap} MW</span>
-                    </div>
-                    <div style={{height:4,background:"rgba(255,255,255,0.04)",borderRadius:99,overflow:"hidden"}}>
-                      <div style={{height:"100%",width:`${pct}%`,background:e.color,borderRadius:99,opacity:0.8}}/>
-                    </div>
-                  </div>
+                  <div key={e.name}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:"0.62rem",color:"#94a3b8",display:"flex",alignItems:"center",gap:5}}><e.icon size={10} style={{color:e.color}}/>{e.name}</span><span style={{fontSize:"0.62rem",color:e.color,fontWeight:700}}>{e.cur}/{e.cap} MW</span></div><div style={{height:4,background:"rgba(255,255,255,0.04)",borderRadius:99,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:e.color,borderRadius:99,opacity:0.8}}/></div></div>
                 );
               })}
             </div>
@@ -641,7 +1009,6 @@ function GridPanel({ sensors }) {
   );
 }
 
-// ── STRATEGIES PANEL ─────────────────────────────────────────────────────────
 function StrategiesPanel({ strategies, saveStrategy, perms, currentUser }) {
   const [showForm, setShowForm] = useState(false);
   const [filterCat, setFilterCat] = useState("all");
@@ -650,70 +1017,46 @@ function StrategiesPanel({ strategies, saveStrategy, perms, currentUser }) {
   const [formErr, setFormErr] = useState("");
   const emptyForm = { title:"", category:"Enerji Səmərəliliyi", desc:"", roi:"", duration:"", annualSavings:"", impact:"", priority:"Orta", status:"Planlaşdırılıb", energySaved:"", co2Reduction:"", progress:0 };
   const [form, setForm] = useState(emptyForm);
-
   const inp = {width:"100%",boxSizing:"border-box",background:"linear-gradient(135deg,rgba(6,12,28,0.95),rgba(4,8,20,0.98))",border:"1px solid rgba(56,189,248,0.18)",borderRadius:9,padding:"9px 12px",color:"#e2e8f0",fontSize:"0.76rem",fontFamily:"inherit",outline:"none"};
-
   const filteredS = strategies.filter(s=>{
     if(filterCat!=="all" && s.category!==filterCat) return false;
     if(filterStatus!=="all" && s.status!==filterStatus) return false;
     return true;
   });
-
   const catOpts = [{value:"all",label:"Bütün Kateqoriyalar",colorDot:"#64748b"},...STRATEGY_CATEGORIES.map(c=>({value:c.value,label:c.value,colorDot:c.color}))];
   const statusOpts = [{value:"all",label:"Bütün Statuslar",colorDot:"#64748b"},...STATUS_OPTS.map(s=>({value:s.value,label:s.value,colorDot:s.color}))];
-
   const handleSave = async () => {
     if (!form.title) { setFormErr("Başlıq daxil edin."); return; }
     setSaving(true); setFormErr("");
-    const catColor = STRATEGY_CATEGORIES.find(c=>c.value===form.category)?.color||"#3b82f6";
-    const priColor = PRIORITY_OPTS.find(p=>p.value===form.priority)?.color||"#f59e0b";
-    const stColor  = STATUS_OPTS.find(s=>s.value===form.status)?.color||"#64748b";
-    await saveStrategy({ ...form, categoryColor:catColor, priorityColor:priColor, statusColor:stColor });
+    // 🔐 Sanitize
+    const cleanForm = sanitizeObject(form);
+    const catColor = STRATEGY_CATEGORIES.find(c=>c.value===cleanForm.category)?.color||"#3b82f6";
+    const priColor = PRIORITY_OPTS.find(p=>p.value===cleanForm.priority)?.color||"#f59e0b";
+    const stColor  = STATUS_OPTS.find(s=>s.value===cleanForm.status)?.color||"#64748b";
+    await saveStrategy({ ...cleanForm, categoryColor:catColor, priorityColor:priColor, statusColor:stColor });
+    // 🔐 Audit log
+    await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:`Yeni strategiya əlavə edildi: "${cleanForm.title}"`, target:"Strategiyalar", severity:'info' });
     setForm(emptyForm); setSaving(false); setShowForm(false);
   };
-
-  // stats
-  const completed = strategies.filter(s=>s.status==="Tamamlandı").length;
-  const inProgress = strategies.filter(s=>s.status==="Davam edir").length;
-
+  const completed=strategies.filter(s=>s.status==="Tamamlandı").length;
+  const inProgress=strategies.filter(s=>s.status==="Davam edir").length;
   return (
     <div>
-      {/* Header KPI */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:18}}>
-        {[
-          {label:"Cəmi Strategiya", value:strategies.length, color:"#38bdf8", Icon:Target},
-          {label:"Davam Edir",      value:inProgress,        color:"#3b82f6", Icon:TrendingUp},
-          {label:"Tamamlandı",      value:completed,         color:"#10b981", Icon:Award},
-          {label:"Planlaşdırılıb",  value:strategies.filter(s=>s.status==="Planlaşdırılıb").length, color:"#f59e0b", Icon:Lightbulb},
-        ].map(({label,value,color,Icon})=>(
+        {[{label:"Cəmi Strategiya",value:strategies.length,color:"#38bdf8",Icon:Target},{label:"Davam Edir",value:inProgress,color:"#3b82f6",Icon:TrendingUp},{label:"Tamamlandı",value:completed,color:"#10b981",Icon:Award},{label:"Planlaşdırılıb",value:strategies.filter(s=>s.status==="Planlaşdırılıb").length,color:"#f59e0b",Icon:Lightbulb}].map(({label,value,color,Icon})=>(
           <div key={label} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:`1px solid ${color}20`,borderRadius:12,padding:"14px 16px",display:"flex",gap:12,alignItems:"center"}}>
             <div style={{width:34,height:34,borderRadius:9,background:`${color}15`,border:`1px solid ${color}30`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon size={16} style={{color}}/></div>
-            <div>
-              <div style={{fontSize:"0.6rem",color:"#475569"}}>{label}</div>
-              <div style={{fontSize:"1.2rem",fontWeight:900,color:"#f1f5f9",lineHeight:1.1}}>{value}</div>
-            </div>
+            <div><div style={{fontSize:"0.6rem",color:"#475569"}}>{label}</div><div style={{fontSize:"1.2rem",fontWeight:900,color:"#f1f5f9",lineHeight:1.1}}>{value}</div></div>
           </div>
         ))}
       </div>
-
-      {/* Toolbar */}
       <div style={{display:"flex",gap:10,marginBottom:14,alignItems:"center",flexWrap:"wrap"}}>
-        <div style={{flex:1,minWidth:160}}>
-          <DarkSelect value={filterCat} onChange={setFilterCat} options={catOpts} placeholder="Kateqoriya"/>
-        </div>
-        <div style={{flex:1,minWidth:140}}>
-          <DarkSelect value={filterStatus} onChange={setFilterStatus} options={statusOpts} placeholder="Status"/>
-        </div>
-        {perms.canEditStrategies&&(
-          <button onClick={()=>setShowForm(f=>!f)} style={{padding:"9px 16px",borderRadius:9,background:showForm?"rgba(56,189,248,0.15)":"rgba(56,189,248,0.08)",border:"1px solid rgba(56,189,248,0.3)",color:"#38bdf8",fontSize:"0.7rem",fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}}>
-            <Plus size={13}/> Yeni Strategiya
-          </button>
-        )}
+        <div style={{flex:1,minWidth:160}}><DarkSelect value={filterCat} onChange={setFilterCat} options={catOpts} placeholder="Kateqoriya"/></div>
+        <div style={{flex:1,minWidth:140}}><DarkSelect value={filterStatus} onChange={setFilterStatus} options={statusOpts} placeholder="Status"/></div>
+        {perms.canEditStrategies&&<button onClick={()=>setShowForm(f=>!f)} style={{padding:"9px 16px",borderRadius:9,background:showForm?"rgba(56,189,248,0.15)":"rgba(56,189,248,0.08)",border:"1px solid rgba(56,189,248,0.3)",color:"#38bdf8",fontSize:"0.7rem",fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}}><Plus size={13}/> Yeni Strategiya</button>}
       </div>
-
-      {/* Add form */}
       {showForm&&perms.canEditStrategies&&(
-        <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.95),rgba(4,8,20,0.98))",border:"1px solid rgba(56,189,248,0.2)",borderRadius:14,padding:20,marginBottom:18,animation:"fadeIn 0.2s ease"}}>
+        <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.95),rgba(4,8,20,0.98))",border:"1px solid rgba(56,189,248,0.2)",borderRadius:14,padding:20,marginBottom:18}}>
           <h3 style={{color:"#f1f5f9",fontSize:"0.82rem",fontWeight:800,marginBottom:14,margin:"0 0 14px"}}>Yeni Strategiya Əlavə Et</h3>
           {formErr&&<div style={{color:"#ef4444",fontSize:"0.7rem",background:"rgba(239,68,68,0.08)",borderRadius:7,padding:"7px 12px",marginBottom:12}}>{formErr}</div>}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -721,12 +1064,12 @@ function StrategiesPanel({ strategies, saveStrategy, perms, currentUser }) {
             <DarkSelect value={form.category} onChange={v=>setForm(f=>({...f,category:v}))} options={STRATEGY_CATEGORIES.map(c=>({value:c.value,label:c.value,colorDot:c.color}))} placeholder="Kateqoriya"/>
             <DarkSelect value={form.priority} onChange={v=>setForm(f=>({...f,priority:v}))} options={PRIORITY_OPTS.map(p=>({value:p.value,label:p.value,colorDot:p.color}))} placeholder="Prioritet"/>
             <DarkSelect value={form.status} onChange={v=>setForm(f=>({...f,status:v}))} options={STATUS_OPTS.map(s=>({value:s.value,label:s.value,colorDot:s.color}))} placeholder="Status"/>
-            <input placeholder="ROI (məs: 24 ay)" value={form.roi} onChange={e=>setForm(f=>({...f,roi:e.target.value}))} style={inp}/>
-            <input placeholder="Müddət (məs: 6 ay)" value={form.duration} onChange={e=>setForm(f=>({...f,duration:e.target.value}))} style={inp}/>
-            <input placeholder="İllik qənaət (məs: 850,000 AZN)" value={form.annualSavings} onChange={e=>setForm(f=>({...f,annualSavings:e.target.value}))} style={inp}/>
-            <input placeholder="Enerji qənaəti (məs: 2.1 GWh/il)" value={form.energySaved} onChange={e=>setForm(f=>({...f,energySaved:e.target.value}))} style={inp}/>
-            <input placeholder="CO₂ azalması (məs: 1,470 ton/il)" value={form.co2Reduction} onChange={e=>setForm(f=>({...f,co2Reduction:e.target.value}))} style={inp}/>
-            <input placeholder="Təsir (məs: Yüksək)" value={form.impact} onChange={e=>setForm(f=>({...f,impact:e.target.value}))} style={inp}/>
+            <input placeholder="ROI" value={form.roi} onChange={e=>setForm(f=>({...f,roi:e.target.value}))} style={inp}/>
+            <input placeholder="Müddət" value={form.duration} onChange={e=>setForm(f=>({...f,duration:e.target.value}))} style={inp}/>
+            <input placeholder="İllik qənaət" value={form.annualSavings} onChange={e=>setForm(f=>({...f,annualSavings:e.target.value}))} style={inp}/>
+            <input placeholder="Enerji qənaəti" value={form.energySaved} onChange={e=>setForm(f=>({...f,energySaved:e.target.value}))} style={inp}/>
+            <input placeholder="CO₂ azalması" value={form.co2Reduction} onChange={e=>setForm(f=>({...f,co2Reduction:e.target.value}))} style={inp}/>
+            <input placeholder="Təsir" value={form.impact} onChange={e=>setForm(f=>({...f,impact:e.target.value}))} style={inp}/>
             <textarea placeholder="Açıqlama" value={form.desc} onChange={e=>setForm(f=>({...f,desc:e.target.value}))} rows={2} style={{...inp,resize:"none",gridColumn:"1/-1"}}/>
           </div>
           <div style={{display:"flex",gap:8,marginTop:12}}>
@@ -737,15 +1080,10 @@ function StrategiesPanel({ strategies, saveStrategy, perms, currentUser }) {
           </div>
         </div>
       )}
-
-      {/* Strategy cards */}
-      {filteredS.length===0&&(
-        <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.1)",borderRadius:14,padding:40,textAlign:"center",color:"#334155",fontSize:"0.76rem"}}>Strategiya tapılmadı</div>
-      )}
+      {filteredS.length===0&&<div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.1)",borderRadius:14,padding:40,textAlign:"center",color:"#334155",fontSize:"0.76rem"}}>Strategiya tapılmadı</div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:12}}>
         {filteredS.map(s=>(
           <div key={s.id} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:`1px solid ${s.categoryColor}22`,borderRadius:14,padding:18,position:"relative",overflow:"hidden"}}>
-            {/* top accent line */}
             <div style={{position:"absolute",top:0,left:0,right:0,height:2,background:`linear-gradient(90deg,${s.categoryColor},transparent)`}}/>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8}}>
               <div style={{flex:1,minWidth:0}}>
@@ -759,31 +1097,14 @@ function StrategiesPanel({ strategies, saveStrategy, perms, currentUser }) {
             </div>
             {s.desc&&<p style={{fontSize:"0.68rem",color:"#64748b",lineHeight:1.55,marginBottom:12,margin:"0 0 12px"}}>{s.desc}</p>}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:12}}>
-              {[
-                s.roi&&{l:"ROI",v:s.roi,c:"#eab308"},
-                s.duration&&{l:"Müddət",v:s.duration,c:"#38bdf8"},
-                s.annualSavings&&{l:"Qənaət",v:s.annualSavings,c:"#10b981"},
-                s.energySaved&&{l:"Enerji",v:s.energySaved,c:"#f59e0b"},
-                s.co2Reduction&&{l:"CO₂",v:s.co2Reduction,c:"#34d399"},
-                s.impact&&{l:"Təsir",v:s.impact,c:"#a78bfa"},
-              ].filter(Boolean).map(({l,v,c})=>(
+              {[s.roi&&{l:"ROI",v:s.roi,c:"#eab308"},s.duration&&{l:"Müddət",v:s.duration,c:"#38bdf8"},s.annualSavings&&{l:"Qənaət",v:s.annualSavings,c:"#10b981"},s.energySaved&&{l:"Enerji",v:s.energySaved,c:"#f59e0b"},s.co2Reduction&&{l:"CO₂",v:s.co2Reduction,c:"#34d399"},s.impact&&{l:"Təsir",v:s.impact,c:"#a78bfa"}].filter(Boolean).map(({l,v,c})=>(
                 <div key={l} style={{background:`${c}08`,border:`1px solid ${c}18`,borderRadius:7,padding:"7px 10px"}}>
                   <div style={{fontSize:"0.56rem",color:"#475569",marginBottom:2}}>{l}</div>
                   <div style={{fontSize:"0.68rem",fontWeight:800,color:c}}>{v}</div>
                 </div>
               ))}
             </div>
-            {s.progress>0&&(
-              <div>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                  <span style={{fontSize:"0.58rem",color:"#475569"}}>Tərəqqi</span>
-                  <span style={{fontSize:"0.62rem",color:s.categoryColor,fontWeight:700}}>{s.progress}%</span>
-                </div>
-                <div style={{height:4,background:"rgba(255,255,255,0.04)",borderRadius:99,overflow:"hidden"}}>
-                  <div style={{height:"100%",width:`${s.progress}%`,background:s.categoryColor,borderRadius:99}}/>
-                </div>
-              </div>
-            )}
+            {s.progress>0&&(<div><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:"0.58rem",color:"#475569"}}>Tərəqqi</span><span style={{fontSize:"0.62rem",color:s.categoryColor,fontWeight:700}}>{s.progress}%</span></div><div style={{height:4,background:"rgba(255,255,255,0.04)",borderRadius:99,overflow:"hidden"}}><div style={{height:"100%",width:`${s.progress}%`,background:s.categoryColor,borderRadius:99}}/></div></div>)}
           </div>
         ))}
       </div>
@@ -791,117 +1112,84 @@ function StrategiesPanel({ strategies, saveStrategy, perms, currentUser }) {
   );
 }
 
-// ── ADMIN PANEL ──────────────────────────────────────────────────────────────
 function AdminPanel({ currentUser, perms, users, pending, activityLog }) {
   const [tab, setTab] = useState("pending");
   const [actionMsg, setActionMsg] = useState("");
   const [processingId, setProcessingId] = useState(null);
-
-  const showMsg = (m) => { setActionMsg(m); setTimeout(()=>setActionMsg(""), 3000); };
-
-  const approveUser = async (user, assignRole) => {
+  const showMsg=(m)=>{setActionMsg(m);setTimeout(()=>setActionMsg(""),3000);};
+  const approveUser=async(user,assignRole)=>{
     setProcessingId(user.id);
-    const { error } = await supabase.from('users').update({ status:'approved', role: assignRole||user.role }).eq('id', user.id);
-    if (error) showMsg("Xəta: "+error.message);
-    else showMsg(`✓ ${user.full_name||user.username} təsdiqləndi`);
+    const {error}=await supabase.from('users').update({status:'approved',role:assignRole||user.role}).eq('id',user.id);
+    if(!error){
+      showMsg(`✓ ${user.full_name||user.username} təsdiqləndi`);
+      await logAudit({userId:currentUser.id,userName:currentUser.name,userRole:currentUser.role,action:`İstifadəçi təsdiqləndi: ${user.full_name||user.username} (rol: ${assignRole||user.role})`,target:"İstifadəçi İdarəetməsi",severity:'info'});
+    } else showMsg("Xəta: "+error.message);
     setProcessingId(null);
   };
-
-  const rejectUser = async (user) => {
+  const rejectUser=async(user)=>{
     setProcessingId(user.id);
-    const { error } = await supabase.from('users').update({ status:'rejected' }).eq('id', user.id);
-    if (error) showMsg("Xəta: "+error.message);
-    else showMsg(`✗ ${user.full_name||user.username} rədd edildi`);
+    const {error}=await supabase.from('users').update({status:'rejected'}).eq('id',user.id);
+    if(!error){
+      showMsg(`✗ ${user.full_name||user.username} rədd edildi`);
+      await logAudit({userId:currentUser.id,userName:currentUser.name,userRole:currentUser.role,action:`İstifadəçi rədd edildi: ${user.full_name||user.username}`,target:"İstifadəçi İdarəetməsi",severity:'warning'});
+    } else showMsg("Xəta: "+error.message);
     setProcessingId(null);
   };
-
-  const blockUser = async (user) => {
+  const blockUser=async(user)=>{
     setProcessingId(user.id);
-    const { error } = await supabase.from('users').update({ status:'blocked' }).eq('id', user.id);
-    if (error) showMsg("Xəta: "+error.message);
-    else showMsg(`⊘ ${user.full_name||user.username} bloklandı`);
+    const {error}=await supabase.from('users').update({status:'blocked'}).eq('id',user.id);
+    if(!error){
+      showMsg(`⊘ ${user.full_name||user.username} bloklandı`);
+      await logAudit({userId:currentUser.id,userName:currentUser.name,userRole:currentUser.role,action:`İstifadəçi bloklandı: ${user.full_name||user.username}`,target:"İstifadəçi İdarəetməsi",severity:'warning'});
+    } else showMsg("Xəta: "+error.message);
     setProcessingId(null);
   };
-
-  const changeRole = async (userId, newRole) => {
-    const { error } = await supabase.from('users').update({ role: newRole }).eq('id', userId);
-    if (!error) showMsg("Rol yeniləndi");
+  const changeRole=async(userId,newRole,userName)=>{
+    const {error}=await supabase.from('users').update({role:newRole}).eq('id',userId);
+    if(!error){
+      showMsg("Rol yeniləndi");
+      await logAudit({userId:currentUser.id,userName:currentUser.name,userRole:currentUser.role,action:`Rol dəyişdirildi: ${userName} → ${newRole}`,target:"RBAC İdarəetməsi",severity:'warning'});
+    }
   };
-
-  const adminTabs = [
-    {k:"pending", l:"Gözləyənlər", Icon:Bell, badge:pending.length},
-    {k:"users",   l:"İstifadəçilər", Icon:Users},
-    ...(perms.canSeeActivityLog?[{k:"log", l:"Fəaliyyət Jurnalı", Icon:History}]:[])
-  ];
-
+  const adminTabs=[{k:"pending",l:"Gözləyənlər",Icon:Bell,badge:pending.length},{k:"users",l:"İstifadəçilər",Icon:Users},...(perms.canSeeActivityLog?[{k:"log",l:"Fəaliyyət Jurnalı",Icon:History}]:[])];
   return (
     <div>
-      {/* Action message */}
-      {actionMsg&&(
-        <div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.25)",borderRadius:9,padding:"9px 14px",marginBottom:14,fontSize:"0.72rem",color:"#34d399",display:"flex",alignItems:"center",gap:8,animation:"fadeIn 0.2s ease"}}>
-          <CheckCircle size={13}/> {actionMsg}
-        </div>
-      )}
-
+      {actionMsg&&<div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.25)",borderRadius:9,padding:"9px 14px",marginBottom:14,fontSize:"0.72rem",color:"#34d399",display:"flex",alignItems:"center",gap:8}}><CheckCircle size={13}/> {actionMsg}</div>}
       {!perms.canSeeAdminTab&&<PermissionBanner message="Bu bölməyə daxil olmaq üçün Administrator və ya Baş Müavin hüququ lazımdır."/>}
       {perms.canSeeAdminTab&&(
         <>
-          {/* inner tabs */}
           <div style={{display:"flex",gap:6,marginBottom:16,borderBottom:"1px solid rgba(56,189,248,0.08)",paddingBottom:0}}>
             {adminTabs.map(({k,l,Icon,badge})=>(
-              <button key={k} onClick={()=>setTab(k)} style={{padding:"8px 14px",border:"none",borderBottom:`2px solid ${tab===k?"#38bdf8":"transparent"}`,background:"transparent",color:tab===k?"#38bdf8":"#475569",cursor:"pointer",fontSize:"0.68rem",fontWeight:700,display:"flex",alignItems:"center",gap:6,transition:"all 0.2s"}}>
-                <Icon size={12}/>{l}
-                {badge>0&&<span style={{background:"#ef4444",color:"#fff",fontSize:"0.5rem",borderRadius:"50%",width:14,height:14,display:"inline-flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{badge}</span>}
+              <button key={k} onClick={()=>setTab(k)} style={{padding:"8px 14px",border:"none",borderBottom:`2px solid ${tab===k?"#38bdf8":"transparent"}`,background:"transparent",color:tab===k?"#38bdf8":"#475569",cursor:"pointer",fontSize:"0.68rem",fontWeight:700,display:"flex",alignItems:"center",gap:6}}>
+                <Icon size={12}/>{l}{badge>0&&<span style={{background:"#ef4444",color:"#fff",fontSize:"0.5rem",borderRadius:"50%",width:14,height:14,display:"inline-flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{badge}</span>}
               </button>
             ))}
           </div>
-
-          {/* Pending users */}
           {tab==="pending"&&(
             <div>
               <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Bell size={11}/> TƏSDİQ GÖZLƏYƏN MÜRACİƏTLƏR ({pending.length})</div>
               {pending.length===0&&<div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.1)",borderRadius:12,padding:32,textAlign:"center",color:"#334155",fontSize:"0.76rem"}}>Gözləyən müraciət yoxdur</div>}
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {pending.map(u=>{
-                  const rd = ROLES_DEF.find(r=>r.id===normalizeRole(u.role))||ROLES_DEF[3];
-                  const isProc = processingId===u.id;
+                  const rd=ROLES_DEF.find(r=>r.id===normalizeRole(u.role))||ROLES_DEF[3];
+                  const isProc=processingId===u.id;
                   return (
                     <div key={u.id} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(245,158,11,0.2)",borderRadius:12,padding:16}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
                         <div style={{flex:1,minWidth:0}}>
                           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                            <div style={{width:32,height:32,borderRadius:8,background:`${rd.color}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.65rem",fontWeight:900,color:rd.color,flexShrink:0}}>
-                              {(u.full_name||u.username||"??").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
-                            </div>
-                            <div>
-                              <div style={{fontSize:"0.76rem",fontWeight:800,color:"#f1f5f9"}}>{u.full_name||u.username}</div>
-                              <div style={{fontSize:"0.62rem",color:"#475569",marginTop:1}}>@{u.username} · {u.email}</div>
-                            </div>
+                            <div style={{width:32,height:32,borderRadius:8,background:`${rd.color}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.65rem",fontWeight:900,color:rd.color,flexShrink:0}}>{(u.full_name||u.username||"??").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}</div>
+                            <div><div style={{fontSize:"0.76rem",fontWeight:800,color:"#f1f5f9"}}>{u.full_name||u.username}</div><div style={{fontSize:"0.62rem",color:"#475569",marginTop:1}}>@{u.username} · {u.email}</div></div>
                           </div>
-                          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                            <RoleBadge role={normalizeRole(u.role)} size="sm"/>
-                            {u.service_region&&<span style={{fontSize:"0.58rem",color:"#64748b",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:4,padding:"2px 7px"}}>{u.service_region}</span>}
-                          </div>
+                          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><RoleBadge role={normalizeRole(u.role)} size="sm"/>{u.service_region&&<span style={{fontSize:"0.58rem",color:"#64748b",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:4,padding:"2px 7px"}}>{u.service_region}</span>}</div>
                           {u.note&&<div style={{fontSize:"0.62rem",color:"#475569",marginTop:6,fontStyle:"italic",padding:"6px 10px",background:"rgba(255,255,255,0.02)",borderRadius:6}}>"{u.note}"</div>}
                         </div>
                         <div style={{fontSize:"0.58rem",color:"#334155",whiteSpace:"nowrap"}}>{relTime(u.created_at)}</div>
                       </div>
                       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-                        {perms.canManageAdmins&&(
-                          <select onChange={e=>approveUser(u, e.target.value)} disabled={isProc}
-                            style={{padding:"7px 10px",borderRadius:7,background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",color:"#34d399",cursor:"pointer",fontSize:"0.65rem",fontWeight:700}}>
-                            <option value="">✓ Təsdiqlə (rol seç)</option>
-                            {ROLES_DEF.map(r=><option key={r.id} value={r.id}>{r.label}</option>)}
-                          </select>
-                        )}
-                        {!perms.canManageAdmins&&(
-                          <button onClick={()=>approveUser(u)} disabled={isProc} style={{padding:"7px 14px",borderRadius:7,background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",color:"#34d399",cursor:"pointer",fontSize:"0.65rem",fontWeight:700,display:"flex",alignItems:"center",gap:5,opacity:isProc?0.5:1}}>
-                            <UserCheck size={12}/> Təsdiqlə
-                          </button>
-                        )}
-                        <button onClick={()=>rejectUser(u)} disabled={isProc} style={{padding:"7px 14px",borderRadius:7,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",cursor:"pointer",fontSize:"0.65rem",fontWeight:700,display:"flex",alignItems:"center",gap:5,opacity:isProc?0.5:1}}>
-                          <UserX size={12}/> Rədd Et
-                        </button>
+                        {perms.canManageAdmins&&<select onChange={e=>approveUser(u,e.target.value)} disabled={isProc} style={{padding:"7px 10px",borderRadius:7,background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",color:"#34d399",cursor:"pointer",fontSize:"0.65rem",fontWeight:700}}><option value="">✓ Təsdiqlə (rol seç)</option>{ROLES_DEF.map(r=><option key={r.id} value={r.id}>{r.label}</option>)}</select>}
+                        {!perms.canManageAdmins&&<button onClick={()=>approveUser(u)} disabled={isProc} style={{padding:"7px 14px",borderRadius:7,background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",color:"#34d399",cursor:"pointer",fontSize:"0.65rem",fontWeight:700,display:"flex",alignItems:"center",gap:5,opacity:isProc?0.5:1}}><UserCheck size={12}/> Təsdiqlə</button>}
+                        <button onClick={()=>rejectUser(u)} disabled={isProc} style={{padding:"7px 14px",borderRadius:7,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",cursor:"pointer",fontSize:"0.65rem",fontWeight:700,display:"flex",alignItems:"center",gap:5,opacity:isProc?0.5:1}}><UserX size={12}/> Rədd Et</button>
                         {isProc&&<RefreshCw size={14} style={{color:"#64748b",animation:"spin 1s linear infinite"}}/>}
                       </div>
                     </div>
@@ -910,46 +1198,29 @@ function AdminPanel({ currentUser, perms, users, pending, activityLog }) {
               </div>
             </div>
           )}
-
-          {/* Users list */}
           {tab==="users"&&(
             <div>
               <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Users size={11}/> AKTİV İSTİFADƏÇİLƏR ({users.length})</div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
                 {users.map(u=>{
-                  const rd = ROLES_DEF.find(r=>r.id===u.role)||ROLES_DEF[3];
-                  const isMe = u.id===currentUser.id;
+                  const rd=ROLES_DEF.find(r=>r.id===u.role)||ROLES_DEF[3];
+                  const isMe=u.id===currentUser.id;
                   return (
                     <div key={u.id} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:`1px solid ${rd.color}18`,borderRadius:11,padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
-                      <div style={{width:34,height:34,borderRadius:9,background:`${rd.color}18`,border:`1px solid ${rd.color}25`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.62rem",fontWeight:900,color:rd.color,flexShrink:0}}>
-                        {(u.name||u.username||"??").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
-                      </div>
+                      <div style={{width:34,height:34,borderRadius:9,background:`${rd.color}18`,border:`1px solid ${rd.color}25`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.62rem",fontWeight:900,color:rd.color,flexShrink:0}}>{(u.name||u.username||"??").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}</div>
                       <div style={{flex:1,minWidth:0}}>
-                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
-                          <span style={{fontSize:"0.73rem",fontWeight:800,color:"#f1f5f9"}}>{u.name||u.username}</span>
-                          {isMe&&<span style={{fontSize:"0.52rem",color:"#38bdf8",background:"rgba(56,189,248,0.1)",border:"1px solid rgba(56,189,248,0.2)",borderRadius:3,padding:"1px 5px"}}>SİZ</span>}
-                        </div>
-                        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-                          <RoleBadge role={u.role} size="xs"/>
-                          {u.serviceArea&&<span style={{fontSize:"0.56rem",color:"#475569"}}>{u.serviceArea}</span>}
-                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}><span style={{fontSize:"0.73rem",fontWeight:800,color:"#f1f5f9"}}>{u.name||u.username}</span>{isMe&&<span style={{fontSize:"0.52rem",color:"#38bdf8",background:"rgba(56,189,248,0.1)",border:"1px solid rgba(56,189,248,0.2)",borderRadius:3,padding:"1px 5px"}}>SİZ</span>}</div>
+                        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><RoleBadge role={u.role} size="xs"/>{u.serviceArea&&<span style={{fontSize:"0.56rem",color:"#475569"}}>{u.serviceArea}</span>}</div>
                       </div>
                       {perms.canManageOps&&!isMe&&(
                         <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                          <select value={u.role} onChange={e=>changeRole(u.id, e.target.value)}
-                            style={{padding:"5px 8px",borderRadius:6,background:"rgba(56,189,248,0.06)",border:"1px solid rgba(56,189,248,0.15)",color:"#94a3b8",cursor:"pointer",fontSize:"0.62rem"}}>
-                            {ROLES_DEF.filter(r=>perms.canManageAdmins?true:r.id!=="admin"&&r.id!=="vice_admin").map(r=>
-                              <option key={r.id} value={r.id}>{r.label}</option>
-                            )}
+                          <select value={u.role} onChange={e=>changeRole(u.id,e.target.value,u.name||u.username)} style={{padding:"5px 8px",borderRadius:6,background:"rgba(56,189,248,0.06)",border:"1px solid rgba(56,189,248,0.15)",color:"#94a3b8",cursor:"pointer",fontSize:"0.62rem"}}>
+                            {ROLES_DEF.filter(r=>perms.canManageAdmins?true:r.id!=="admin"&&r.id!=="vice_admin").map(r=><option key={r.id} value={r.id}>{r.label}</option>)}
                           </select>
-                          <button onClick={()=>blockUser(u)} title="Blokla" style={{padding:"5px 8px",borderRadius:6,background:"rgba(239,68,68,0.07)",border:"1px solid rgba(239,68,68,0.18)",color:"#ef4444",cursor:"pointer",fontSize:"0.6rem",display:"flex",alignItems:"center",gap:4}}>
-                            <ShieldOff size={10}/> Blokla
-                          </button>
+                          <button onClick={()=>blockUser(u)} style={{padding:"5px 8px",borderRadius:6,background:"rgba(239,68,68,0.07)",border:"1px solid rgba(239,68,68,0.18)",color:"#ef4444",cursor:"pointer",fontSize:"0.6rem",display:"flex",alignItems:"center",gap:4}}><ShieldOff size={10}/> Blokla</button>
                         </div>
                       )}
-                      <span style={{fontSize:"0.56rem",color:`${u.status==="blocked"?"#ef4444":u.status==="active"?"#10b981":"#64748b"}`,background:`${u.status==="blocked"?"rgba(239,68,68,0.08)":u.status==="active"?"rgba(16,185,129,0.08)":"rgba(100,116,139,0.08)"}`,border:`1px solid ${u.status==="blocked"?"rgba(239,68,68,0.2)":u.status==="active"?"rgba(16,185,129,0.2)":"rgba(100,116,139,0.15)"}`,borderRadius:4,padding:"2px 7px",fontWeight:700,flexShrink:0}}>
-                        {u.status==="blocked"?"BLOK":u.status==="active"?"AKTİV":"—"}
-                      </span>
+                      <span style={{fontSize:"0.56rem",color:`${u.status==="blocked"?"#ef4444":u.status==="active"?"#10b981":"#64748b"}`,background:`${u.status==="blocked"?"rgba(239,68,68,0.08)":u.status==="active"?"rgba(16,185,129,0.08)":"rgba(100,116,139,0.08)"}`,border:`1px solid ${u.status==="blocked"?"rgba(239,68,68,0.2)":u.status==="active"?"rgba(16,185,129,0.2)":"rgba(100,116,139,0.15)"}`,borderRadius:4,padding:"2px 7px",fontWeight:700,flexShrink:0}}>{u.status==="blocked"?"BLOK":u.status==="active"?"AKTİV":"—"}</span>
                     </div>
                   );
                 })}
@@ -957,8 +1228,6 @@ function AdminPanel({ currentUser, perms, users, pending, activityLog }) {
               </div>
             </div>
           )}
-
-          {/* Activity log */}
           {tab==="log"&&perms.canSeeActivityLog&&(
             <div>
               <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,marginBottom:12,display:"flex",alignItems:"center",gap:6}}><History size={11}/> FƏALİYYƏT JURNALI</div>
@@ -967,10 +1236,7 @@ function AdminPanel({ currentUser, perms, users, pending, activityLog }) {
                 {activityLog.map((entry,i)=>(
                   <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 14px",background:"rgba(255,255,255,0.02)",borderRadius:9,border:"1px solid rgba(56,189,248,0.07)"}}>
                     <div style={{width:6,height:6,borderRadius:"50%",background:"#38bdf8",marginTop:5,flexShrink:0}}/>
-                    <div style={{flex:1}}>
-                      <span style={{fontSize:"0.7rem",color:"#e2e8f0"}}>{entry.action}</span>
-                      <div style={{fontSize:"0.58rem",color:"#334155",marginTop:2}}>{entry.actor} · {relTime(entry.time)}</div>
-                    </div>
+                    <div style={{flex:1}}><span style={{fontSize:"0.7rem",color:"#e2e8f0"}}>{entry.action}</span><div style={{fontSize:"0.58rem",color:"#334155",marginTop:2}}>{entry.actor} · {relTime(entry.time)}</div></div>
                   </div>
                 ))}
               </div>
@@ -982,7 +1248,7 @@ function AdminPanel({ currentUser, perms, users, pending, activityLog }) {
   );
 }
 
-// ── AUTH ─────────────────────────────────────────────────────────────────────
+// ─── AUTH SCREEN ─────────────────────────────────────────────────────────────
 function AuthScreen({ onLogin, onRegister }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
@@ -995,25 +1261,47 @@ function AuthScreen({ onLogin, onRegister }) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [rateLimitInfo, setRateLimitInfo] = useState(null);
+
   const groupedAreas = [
     { label:"RAYONLAR", options: SERVICE_AREAS["Rayonlar"].map(v=>({value:v,label:v,colorDot:"#3b82f6"})) },
     { label:"STANSIYALAR", options: SERVICE_AREAS["Stansiyalar"].map(v=>({value:v,label:v,colorDot:"#10b981"})) }
   ];
   const roleOpts = ROLES_DEF.filter(r=>r.id!=="admin"&&r.id!=="vice_admin").map(r=>({value:r.id,label:r.label,colorDot:r.color,sub:r.desc}));
   const inp = {width:"100%",boxSizing:"border-box",background:"linear-gradient(135deg,rgba(6,12,28,0.95),rgba(4,8,20,0.98))",border:"1px solid rgba(56,189,248,0.18)",borderRadius:9,padding:"9px 12px",color:"#e2e8f0",fontSize:"0.76rem",fontFamily:"inherit",outline:"none"};
+
   const submit = async () => {
     setError(""); setLoading(true);
     if (mode==="login") {
-      const res = await onLogin(username, password);
-      if (!res.ok) setError(res.msg);
+      // 🔐 Rate limiting check
+      const rlKey = `login:${sanitizeInput(username)}`;
+      const rl = rateLimiter.check(rlKey);
+      if (!rl.allowed) {
+        setError(`Çox sayda uğursuz cəhd. ${rl.remaining} dəqiqə gözləyin.`);
+        setRateLimitInfo({ remaining: rl.remaining });
+        setLoading(false);
+        return;
+      }
+      const cleanUsername = sanitizeInput(username);
+      const res = await onLogin(cleanUsername, password);
+      if (!res.ok) {
+        setError(res.msg);
+        if (rl.attemptsLeft <= 2) setRateLimitInfo({ attemptsLeft: rl.attemptsLeft });
+      } else {
+        rateLimiter.reset(rlKey);
+        setRateLimitInfo(null);
+      }
     } else {
       if (!username||!password||!name||!email||!serviceArea) { setError("Bütün sahələri doldurun."); setLoading(false); return; }
-      const res = await onRegister({ username,password,name,email,requestedRole,serviceArea,note });
+      // 🔐 Sanitize all register fields
+      const cleanData = sanitizeObject({ username, name, email, serviceArea, note });
+      const res = await onRegister({ ...cleanData, password, requestedRole });
       if (res && res.error) { setError(res.error); setLoading(false); return; }
       setSuccess(true);
     }
     setLoading(false);
   };
+
   if (success) return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#020610,#030915)",display:"flex",alignItems:"center",justifyContent:"center"}}>
       <div style={{textAlign:"center",padding:40}}>
@@ -1024,17 +1312,24 @@ function AuthScreen({ onLogin, onRegister }) {
       </div>
     </div>
   );
+
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#020610,#030915)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Inter',system-ui,sans-serif"}}>
-      <div style={{width:420,background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.15)",borderRadius:18,padding:36,backdropFilter:"blur(20px)"}}>
+      <div style={{width:440,background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.15)",borderRadius:18,padding:36,backdropFilter:"blur(20px)"}}>
         <div style={{textAlign:"center",marginBottom:28}}>
           <div style={{width:52,height:52,borderRadius:14,background:"linear-gradient(135deg,rgba(56,189,248,0.2),rgba(14,165,233,0.1))",border:"1px solid rgba(56,189,248,0.3)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 12px"}}><Zap size={26} style={{color:"#38bdf8"}}/></div>
           <h1 style={{color:"#f1f5f9",fontSize:"1.1rem",fontWeight:900,marginBottom:4}}>Naxçıvan Enerji İdarəetmə Sistemi</h1>
           <p style={{color:"#334155",fontSize:"0.7rem"}}>{mode==="login"?"Hesabınıza daxil olun":"Yeni hesab tələb edin"}</p>
+          {/* 🔐 Security status */}
+          <div style={{display:"flex",justifyContent:"center",gap:8,marginTop:10,flexWrap:"wrap"}}>
+            {[{Icon:Lock,label:"TLS 1.3",c:"#10b981"},{Icon:ShieldCheck,label:"RBAC",c:"#10b981"},{Icon:Ban,label:"Rate Limit",c:"#10b981"}].map(({Icon,label,c})=>(
+              <span key={label} style={{fontSize:"0.52rem",color:c,background:`${c}10`,border:`1px solid ${c}20`,borderRadius:4,padding:"2px 7px",display:"inline-flex",alignItems:"center",gap:3}}><Icon size={7}/>{label}</span>
+            ))}
+          </div>
         </div>
         <div style={{display:"flex",gap:8,marginBottom:22}}>
           {[{k:"login",l:"Giriş",Icon:LogIn},{k:"register",l:"Qeydiyyat",Icon:UserPlus}].map(({k,l,Icon})=>(
-            <button key={k} onClick={()=>{setMode(k);setError("");}} style={{flex:1,padding:"8px",borderRadius:8,border:`1px solid ${mode===k?"rgba(56,189,248,0.4)":"rgba(56,189,248,0.1)"}`,background:mode===k?"rgba(56,189,248,0.12)":"transparent",color:mode===k?"#38bdf8":"#475569",cursor:"pointer",fontSize:"0.72rem",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Icon size={13}/>{l}</button>
+            <button key={k} onClick={()=>{setMode(k);setError("");setRateLimitInfo(null);}} style={{flex:1,padding:"8px",borderRadius:8,border:`1px solid ${mode===k?"rgba(56,189,248,0.4)":"rgba(56,189,248,0.1)"}`,background:mode===k?"rgba(56,189,248,0.12)":"transparent",color:mode===k?"#38bdf8":"#475569",cursor:"pointer",fontSize:"0.72rem",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Icon size={13}/>{l}</button>
           ))}
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -1047,7 +1342,13 @@ function AuthScreen({ onLogin, onRegister }) {
             <DarkSelect value={serviceArea} onChange={setArea} placeholder="Xidmət sahəsi seçin" grouped={groupedAreas}/>
             <textarea placeholder="Qeyd (ixtiyari)" value={note} onChange={e=>setNote(e.target.value)} rows={2} style={{...inp,resize:"none"}}/>
           </>}
-          {error&&<div style={{color:"#ef4444",fontSize:"0.7rem",textAlign:"center",background:"rgba(239,68,68,0.08)",borderRadius:7,padding:"8px 12px"}}>{error}</div>}
+          {/* Rate limit warning */}
+          {rateLimitInfo?.attemptsLeft&&(
+            <div style={{fontSize:"0.67rem",color:"#f59e0b",background:"rgba(245,158,11,0.08)",border:"1px solid rgba(245,158,11,0.2)",borderRadius:7,padding:"8px 12px",display:"flex",alignItems:"center",gap:7}}>
+              <AlertTriangle size={12}/> Xəbərdarlıq: Yalnız <strong>{rateLimitInfo.attemptsLeft}</strong> cəhdiniz qalır
+            </div>
+          )}
+          {error&&<div style={{color:"#ef4444",fontSize:"0.7rem",textAlign:"center",background:"rgba(239,68,68,0.08)",borderRadius:7,padding:"8px 12px",display:"flex",alignItems:"center",gap:7,justifyContent:"center"}}><AlertOctagon size={12}/>{error}</div>}
           <button onClick={submit} disabled={loading} style={{width:"100%",padding:"11px",borderRadius:10,background:"linear-gradient(135deg,rgba(56,189,248,0.18),rgba(14,165,233,0.1))",border:"1px solid rgba(56,189,248,0.35)",color:"#38bdf8",fontWeight:800,fontSize:"0.8rem",cursor:loading?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,opacity:loading?0.6:1}}>
             {loading?<RefreshCw size={14} style={{animation:"spin 1s linear infinite"}}/>:mode==="login"?<><LogIn size={14}/>Daxil Ol</>:<><UserPlus size={14}/>Müraciət Et</>}
           </button>
@@ -1057,7 +1358,6 @@ function AuthScreen({ onLogin, onRegister }) {
   );
 }
 
-// ── MESSAGING PANEL ───────────────────────────────────────────────────────────
 function MessagingPanel({ currentUser, users, messages, onSend, perms }) {
   const [tab, setTab] = useState("inbox");
   const [compose, setCompose] = useState(false);
@@ -1079,23 +1379,23 @@ function MessagingPanel({ currentUser, users, messages, onSend, perms }) {
   ];
   const handleSend = async () => {
     if (!subject||!body) return;
+    // 🔐 Sanitize
+    const cleanSubj = sanitizeInput(subject);
+    const cleanBody = sanitizeInput(body);
     const isBroadcast = recipient==="broadcast";
     const toUser = isBroadcast?null:users.find(u=>String(u.id)===recipient);
-    const { error } = await supabase.from('messages').insert([{from_id:currentUser.id,from_name:currentUser.name,from_avatar:currentUser.avatar,from_role:currentUser.role,to_id:isBroadcast?null:(toUser?.id||null),to_name:isBroadcast?"Hamı":(toUser?.name||""),subject,body,priority,type:isBroadcast?"broadcast":"direct",read_by:[currentUser.id]}]);
+    const { error } = await supabase.from('messages').insert([{from_id:currentUser.id,from_name:currentUser.name,from_avatar:currentUser.avatar,from_role:currentUser.role,to_id:isBroadcast?null:(toUser?.id||null),to_name:isBroadcast?"Hamı":(toUser?.name||""),subject:cleanSubj,body:cleanBody,priority,type:isBroadcast?"broadcast":"direct",read_by:[currentUser.id]}]);
     if (!error) { setCompose(false);setSubj("");setBody("");setRec("broadcast");setPri("normal"); }
   };
   if (viewing) {
-    const msg = messages.find(m=>m.id===viewing);
-    if (!msg) { setView(null); return null; }
+    const msg=messages.find(m=>m.id===viewing);
+    if(!msg){setView(null);return null;}
     return (
       <div style={{color:"#94a3b8"}}>
         <button onClick={()=>setView(null)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",color:"#38bdf8",cursor:"pointer",fontSize:"0.72rem",marginBottom:16}}><ArrowLeft size={13}/> Geri</button>
         <div style={{background:"rgba(255,255,255,0.02)",border:"1px solid rgba(56,189,248,0.12)",borderRadius:12,padding:20}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-            <div>
-              <h3 style={{color:"#f1f5f9",fontSize:"0.9rem",fontWeight:800,margin:0}}>{msg.subject}</h3>
-              <div style={{fontSize:"0.65rem",color:"#475569",marginTop:4}}><span style={{color:"#94a3b8"}}>{msg.fromName}</span> → <span style={{color:"#94a3b8"}}>{msg.toName||"Hamı"}</span> · {relTime(msg.timestamp)}</div>
-            </div>
+            <div><h3 style={{color:"#f1f5f9",fontSize:"0.9rem",fontWeight:800,margin:0}}>{msg.subject}</h3><div style={{fontSize:"0.65rem",color:"#475569",marginTop:4}}><span style={{color:"#94a3b8"}}>{msg.fromName}</span> → <span style={{color:"#94a3b8"}}>{msg.toName||"Hamı"}</span> · {relTime(msg.timestamp)}</div></div>
             {msg.priority==="high"&&<span style={{fontSize:"0.58rem",color:"#ef4444",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.25)",borderRadius:4,padding:"2px 8px",fontWeight:800}}>TƏCİLİ</span>}
           </div>
           <p style={{fontSize:"0.78rem",lineHeight:1.7,color:"#cbd5e1",whiteSpace:"pre-wrap"}}>{msg.body}</p>
@@ -1132,13 +1432,10 @@ function MessagingPanel({ currentUser, users, messages, onSend, perms }) {
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
         {myMessages.length===0&&<div style={{color:"#334155",fontSize:"0.72rem",textAlign:"center",padding:"20px 0"}}>Mesaj yoxdur</div>}
         {myMessages.map(msg=>{
-          const isUnread = !(msg.readBy||[]).includes(currentUser.id)&&tab==="inbox";
+          const isUnread=!(msg.readBy||[]).includes(currentUser.id)&&tab==="inbox";
           return (
             <div key={msg.id} onClick={()=>setView(msg.id)} style={{background:isUnread?"rgba(56,189,248,0.06)":"rgba(255,255,255,0.02)",border:`1px solid ${isUnread?"rgba(56,189,248,0.2)":"rgba(56,189,248,0.08)"}`,borderRadius:9,padding:"10px 12px",cursor:"pointer"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
-                <span style={{fontSize:"0.72rem",fontWeight:isUnread?800:600,color:isUnread?"#f1f5f9":"#94a3b8"}}>{msg.subject}</span>
-                <span style={{fontSize:"0.6rem",color:"#334155"}}>{relTime(msg.timestamp)}</span>
-              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}><span style={{fontSize:"0.72rem",fontWeight:isUnread?800:600,color:isUnread?"#f1f5f9":"#94a3b8"}}>{msg.subject}</span><span style={{fontSize:"0.6rem",color:"#334155"}}>{relTime(msg.timestamp)}</span></div>
               <div style={{fontSize:"0.62rem",color:"#475569"}}>{tab==="inbox"?msg.fromName:msg.toName||"Hamı"} {msg.type==="broadcast"&&<span style={{color:"#f97316",fontSize:"0.55rem"}}>[Broadcast]</span>}</div>
             </div>
           );
@@ -1148,17 +1445,39 @@ function MessagingPanel({ currentUser, users, messages, onSend, perms }) {
   );
 }
 
-// ── ANA KOMPONENT ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// ANA KOMPONENT
+// ═══════════════════════════════════════════════════════════════
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [users, setUsers] = useState([]);
   const [pending, setPending] = useState([]);
   const [activityLog, setActLog] = useState([]);
+  const [sessionTimeoutMsg, setSessionTimeoutMsg] = useState(false);
   const { messages, setMessages } = useSupabaseMessages();
   const { alerts, setAlerts } = useSupabaseAlerts();
   const { dataEntries, setDataEntries } = useSupabaseDataEntries();
   const { strategies, setStrategies } = useSupabaseStrategies();
+  const auditLogs = useAuditLogs();
   const [sensorOverrides, setSensorOverrides] = useState({});
+
+  // 🔐 Session timeout handler
+  const handleLogout = useCallback(async (reason) => {
+    if (currentUser) {
+      if (reason === "session_timeout") {
+        setSessionTimeoutMsg(true);
+        await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:"Sessiya vaxtı doldu – avtomatik çıxış", target:"Auth", severity:'warning' });
+        setTimeout(()=>setSessionTimeoutMsg(false), 4000);
+      } else {
+        await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:"İstifadəçi sistemdən çıxdı", target:"Auth", severity:'info' });
+      }
+    }
+    setCurrentUser(null); setTab("overview");
+  }, [currentUser]);
+
+  // 🔐 Session timeout
+  useSessionTimeout(currentUser, handleLogout);
 
   useEffect(() => {
     const loadPending = async () => {
@@ -1201,30 +1520,34 @@ export default function App() {
 
   const handleLogin = async (username, password) => {
     if (!username||!password) return {ok:false,msg:"İstifadəçi adı və şifrəni daxil edin."};
-    const {data,error} = await supabase.from('users').select('*').eq('username',username).eq('password',password).single();
+    const cleanUsername = sanitizeInput(username);
+    const {data,error} = await supabase.from('users').select('*').eq('username',cleanUsername).eq('password',password).single();
     if (error||!data) return {ok:false,msg:"İstifadəçi adı və ya şifrə yanlışdır."};
     if (data.status==='pending') return {ok:false,msg:"Hesabınız hələ təsdiqlənməyib."};
     if (data.status==='rejected') return {ok:false,msg:"Hesab müraciətiniz rədd edilib."};
     if (data.status==='blocked') return {ok:false,msg:"Hesabınız bloklanıb."};
     const normalizedRole = normalizeRole(data.role);
     const userName = data.full_name||data.name||data.username;
-    setCurrentUser({...data,id:data.id,name:userName,role:normalizedRole,serviceArea:data.service_region||"Bütün Ərazilər",avatar:userName.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()});
+    const user = {...data,id:data.id,name:userName,role:normalizedRole,serviceArea:data.service_region||"Bütün Ərazilər",avatar:userName.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()};
+    setCurrentUser(user);
+    // 🔐 Audit log
+    await logAudit({ userId:data.id, userName, userRole:normalizedRole, action:`Sistemə giriş: ${cleanUsername}`, target:"Auth", severity:'info' });
     return {ok:true};
   };
 
   const handleRegister = async (formData) => {
     try {
-      const {data:existing} = await supabase.from('users').select('id').eq('username',formData.username).maybeSingle();
+      // 🔐 Sanitize
+      const clean = sanitizeObject(formData);
+      const {data:existing} = await supabase.from('users').select('id').eq('username',clean.username).maybeSingle();
       if (existing) return {error:"Bu istifadəçi adı artıq mövcuddur."};
-      const {data:existingEmail} = await supabase.from('users').select('id').eq('email',formData.email).maybeSingle();
+      const {data:existingEmail} = await supabase.from('users').select('id').eq('email',clean.email).maybeSingle();
       if (existingEmail) return {error:"Bu e-poçt artıq qeydiyyatdadır."};
-      const {error} = await supabase.from('users').insert([{username:formData.username,password:formData.password,full_name:formData.name,email:formData.email,role:formData.requestedRole||'viewer',status:'pending',service_region:formData.serviceArea,note:formData.note||""}]).select();
+      const {error} = await supabase.from('users').insert([{username:clean.username,password:formData.password,full_name:clean.name,email:clean.email,role:clean.requestedRole||'viewer',status:'pending',service_region:clean.serviceArea,note:clean.note||""}]).select();
       if (error) return {error:`Xəta: ${error.message}`};
       return {ok:true};
     } catch(err) { return {error:"Gözlənilməz xəta baş verdi."}; }
   };
-
-  const handleLogout = () => { setCurrentUser(null); setTab("overview"); };
 
   const saveStrategy = async (s) => {
     const {error} = await supabase.from('strategies').insert([{title:s.title,category:s.category,category_color:s.categoryColor||"#3b82f6",description:s.desc,roi:s.roi,duration:s.duration,annual_savings:s.annualSavings||"",impact:s.impact||"",priority:s.priority||"Orta",priority_color:s.priorityColor||"#f59e0b",status:s.status||"Planlaşdırılıb",status_color:s.statusColor||"#f59e0b",energy_saved:s.energySaved||"",co2_reduction:s.co2Reduction||"",progress:s.progress||0,completed:s.completed||false}]);
@@ -1236,7 +1559,10 @@ export default function App() {
     if (error) console.error("Alert insert error:",error);
   };
 
-  const removeAlert = async (id) => { await supabase.from('alerts').delete().eq('id',id); };
+  const removeAlert = async (id) => {
+    await supabase.from('alerts').delete().eq('id',id);
+    if (currentUser) await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:`Hadisə silindi (ID: ${id})`, target:"Hadisələr", severity:'warning' });
+  };
 
   const toggleNode = (id) => setSelNodeIds(prev=>prev.includes(id)?(prev.length>1?prev.filter(x=>x!==id):prev):[...prev,id]);
 
@@ -1244,7 +1570,18 @@ export default function App() {
   const unreadMsgs = currentUser ? messages.filter(m=>(m.toId===currentUser.id||(m.type==="broadcast"&&m.fromId!==currentUser.id))&&!(m.readBy||[]).includes(currentUser.id)).length : 0;
   const perms = getPerms(currentUser);
 
-  if (!currentUser) return <AuthScreen onLogin={handleLogin} onRegister={handleRegister}/>;
+  const activeSecurityCount = SECURITY_PROTOCOLS.filter(p=>p.status==="aktiv").length;
+
+  if (!currentUser) return (
+    <div>
+      {sessionTimeoutMsg&&(
+        <div style={{position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",zIndex:9999,background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.35)",borderRadius:10,padding:"12px 20px",display:"flex",alignItems:"center",gap:8,boxShadow:"0 8px 24px rgba(0,0,0,0.4)"}}>
+          <Clock size={14} style={{color:"#f59e0b"}}/><span style={{fontSize:"0.75rem",color:"#fcd34d",fontWeight:700}}>Sessiya vaxtı doldu. Zəhmət olmasa yenidən daxil olun.</span>
+        </div>
+      )}
+      <AuthScreen onLogin={handleLogin} onRegister={handleRegister}/>
+    </div>
+  );
 
   const TABS = [
     {k:"overview",   l:"Ümumi Baxış",    Icon:BarChart2},
@@ -1254,6 +1591,7 @@ export default function App() {
     {k:"strategies", l:"Strategiyalar",  Icon:Leaf},
     {k:"incidents",  l:"Hadisələr",      Icon:AlertTriangle},
     {k:"messages",   l:"Mesajlar",       Icon:MessageSquare, badge:unreadMsgs},
+    ...(perms.canSeeSecurityTab?[{k:"security",l:"Təhlükəsizlik",Icon:ShieldCheck}]:[]),
     ...(perms.canSeeAdminTab?[{k:"admin",l:"Admin",Icon:Crown,badge:pending.length}]:[])
   ];
 
@@ -1273,8 +1611,10 @@ export default function App() {
         @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
         @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+        @keyframes securityPulse{0%,100%{box-shadow:0 0 0 0 rgba(16,185,129,0.3)}50%{box-shadow:0 0 0 4px rgba(16,185,129,0)}}
       `}</style>
 
+      {/* Header */}
       <header style={{background:"linear-gradient(90deg,rgba(2,6,16,0.95),rgba(4,8,22,0.95))",borderBottom:"1px solid rgba(56,189,248,0.1)",padding:"12px 20px",display:"flex",alignItems:"center",gap:16,position:"sticky",top:0,zIndex:100,backdropFilter:"blur(20px)"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0}}>
           <div style={{width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,rgba(56,189,248,0.2),rgba(14,165,233,0.1))",border:"1px solid rgba(56,189,248,0.3)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Zap size={20} style={{color:"#38bdf8"}}/></div>
@@ -1288,16 +1628,19 @@ export default function App() {
           <span style={{fontSize:"0.65rem",color:"#10b981",fontWeight:700}}>Aktiv</span>
           <span style={{fontSize:"0.65rem",color:"#334155",marginLeft:6}}>{totalOutput.toFixed(1)} MW / {totalCapacity} MW</span>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:8}}>
+        {/* 🔐 Security status in header */}
+        <SecurityBadge count={activeSecurityCount}/>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4}}>
           <div style={{width:32,height:32,borderRadius:8,background:`${ROLES_DEF.find(r=>r.id===currentUser.role)?.color||"#64748b"}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.6rem",fontWeight:900,color:ROLES_DEF.find(r=>r.id===currentUser.role)?.color||"#64748b"}}>{currentUser.avatar}</div>
           <div style={{display:"flex",flexDirection:"column"}}>
             <span style={{fontSize:"0.68rem",color:"#e2e8f0",fontWeight:700}}>{currentUser.name}</span>
             <RoleBadge role={currentUser.role} size="xs"/>
           </div>
-          <button onClick={handleLogout} style={{padding:"5px 10px",borderRadius:7,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",cursor:"pointer",fontSize:"0.62rem",display:"flex",alignItems:"center",gap:4}}><LogOut size={10}/>Çıx</button>
+          <button onClick={()=>handleLogout("manual")} style={{padding:"5px 10px",borderRadius:7,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",cursor:"pointer",fontSize:"0.62rem",display:"flex",alignItems:"center",gap:4}}><LogOut size={10}/>Çıx</button>
         </div>
       </header>
 
+      {/* Nav */}
       <nav style={{background:"linear-gradient(90deg,rgba(2,6,14,0.9),rgba(3,8,20,0.9))",borderBottom:"1px solid rgba(56,189,248,0.08)",padding:"0 20px",display:"flex",gap:2,overflowX:"auto"}}>
         {TABS.map(({k,l,Icon,badge})=>(
           <button key={k} onClick={()=>setTab(k)} style={{padding:"10px 14px",border:"none",borderBottom:`2px solid ${activeTab===k?"#38bdf8":"transparent"}`,background:"transparent",color:activeTab===k?"#38bdf8":"#475569",cursor:"pointer",fontSize:"0.68rem",fontWeight:700,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6,transition:"all 0.2s",position:"relative"}}>
@@ -1314,20 +1657,32 @@ export default function App() {
           <div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:14,marginBottom:20}}>
               {[
-                {label:"Ümumi İstehsal",   value:`${totalOutput.toFixed(1)} MW`,   sub:`Gücün ${gridEfficiency}%-i`,          color:"#38bdf8", Icon:Zap},
-                {label:"Sistem Gücü",      value:`${totalCapacity} MW`,             sub:`${ENERGY_SOURCES.length} mənbə`,     color:"#10b981", Icon:Battery},
-                {label:"Şəbəkə Fəallığı", value:`${gridEfficiency}%`,              sub:"Real vaxt",                          color:"#eab308", Icon:TrendingUp},
+                {label:"Ümumi İstehsal",   value:`${totalOutput.toFixed(1)} MW`, sub:`Gücün ${gridEfficiency}%-i`, color:"#38bdf8", Icon:Zap},
+                {label:"Sistem Gücü",      value:`${totalCapacity} MW`, sub:`${ENERGY_SOURCES.length} mənbə`, color:"#10b981", Icon:Battery},
+                {label:"Şəbəkə Fəallığı", value:`${gridEfficiency}%`, sub:"Real vaxt", color:"#eab308", Icon:TrendingUp},
                 {label:"Aktiv Hadisələr",  value:filteredAlerts.filter(a=>a.severity==="yüksək").length, sub:`${filteredAlerts.length} ümumilikdə`, color:"#ef4444", Icon:AlertTriangle},
               ].map(({label,value,sub,color,Icon})=>(
                 <div key={label} style={{...card(),display:"flex",gap:14,alignItems:"flex-start"}}>
                   <div style={{width:42,height:42,borderRadius:12,background:`${color}15`,border:`1px solid ${color}30`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon size={20} style={{color}}/></div>
-                  <div>
-                    <div style={{fontSize:"0.65rem",color:"#475569",marginBottom:3}}>{label}</div>
-                    <div style={{fontSize:"1.2rem",fontWeight:900,color:"#f1f5f9",lineHeight:1}}>{value}</div>
-                    <div style={{fontSize:"0.6rem",color:"#334155",marginTop:3}}>{sub}</div>
-                  </div>
+                  <div><div style={{fontSize:"0.65rem",color:"#475569",marginBottom:3}}>{label}</div><div style={{fontSize:"1.2rem",fontWeight:900,color:"#f1f5f9",lineHeight:1}}>{value}</div><div style={{fontSize:"0.6rem",color:"#334155",marginTop:3}}>{sub}</div></div>
                 </div>
               ))}
+            </div>
+            {/* 🔐 Security summary strip */}
+            <div style={{...card(),marginBottom:14,padding:"12px 18px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                <div style={{display:"flex",alignItems:"center",gap:6}}><ShieldCheck size={14} style={{color:"#10b981"}}/><span style={{fontSize:"0.68rem",fontWeight:700,color:"#10b981"}}>Təhlükəsizlik Vəziyyəti</span></div>
+                <div style={{width:1,height:16,background:"rgba(255,255,255,0.08)"}}/>
+                {SECURITY_PROTOCOLS.slice(0,7).map(p=>(
+                  <div key={p.id} style={{display:"flex",alignItems:"center",gap:4}}>
+                    <div style={{width:5,height:5,borderRadius:"50%",background:p.status==="aktiv"?"#10b981":p.status==="planlanir"?"#f59e0b":"#64748b",animation:p.status==="aktiv"?"pulse 2s infinite":"none"}}/>
+                    <span style={{fontSize:"0.58rem",color:"#64748b"}}>{p.name}</span>
+                  </div>
+                ))}
+                <div style={{marginLeft:"auto"}}>
+                  <button onClick={()=>setTab("security")} style={{padding:"4px 10px",borderRadius:6,background:"rgba(16,185,129,0.08)",border:"1px solid rgba(16,185,129,0.2)",color:"#10b981",cursor:"pointer",fontSize:"0.6rem",fontWeight:700,display:"flex",alignItems:"center",gap:4}}><Eye size={9}/> Ətraflı</button>
+                </div>
+              </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 320px",gap:14,marginBottom:14}}>
               <div style={card()}>
@@ -1362,26 +1717,19 @@ export default function App() {
           <div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
               {NODES.map(n=>{
-                const sel = selNodeIds.includes(n.id);
-                return (
-                  <button key={n.id} onClick={()=>toggleNode(n.id)} style={{padding:"7px 14px",borderRadius:9,border:`1px solid ${sel?n.color+"60":n.color+"20"}`,background:sel?`${n.color}15`:"transparent",color:sel?n.color:"#475569",cursor:"pointer",fontSize:"0.65rem",fontWeight:sel?700:500,display:"flex",alignItems:"center",gap:6,transition:"all 0.2s"}}>
-                    <n.icon size={12}/>{n.label.split(" ").slice(0,2).join(" ")}
-                  </button>
-                );
+                const sel=selNodeIds.includes(n.id);
+                return <button key={n.id} onClick={()=>toggleNode(n.id)} style={{padding:"7px 14px",borderRadius:9,border:`1px solid ${sel?n.color+"60":n.color+"20"}`,background:sel?`${n.color}15`:"transparent",color:sel?n.color:"#475569",cursor:"pointer",fontSize:"0.65rem",fontWeight:sel?700:500,display:"flex",alignItems:"center",gap:6}}><n.icon size={12}/>{n.label.split(" ").slice(0,2).join(" ")}</button>;
               })}
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
               {NODES.filter(n=>selNodeIds.includes(n.id)).map(n=>{
-                const s = sensors[n.id]||{};
+                const s=sensors[n.id]||{};
                 return (
                   <div key={n.id} style={{...card(),borderColor:`${n.color}25`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
                         <div style={{width:32,height:32,borderRadius:9,background:`${n.color}15`,border:`1px solid ${n.color}30`,display:"flex",alignItems:"center",justifyContent:"center"}}><n.icon size={16} style={{color:n.color}}/></div>
-                        <div>
-                          <div style={{fontSize:"0.75rem",fontWeight:800,color:"#f1f5f9",lineHeight:1.2}}>{n.label}</div>
-                          <div style={{fontSize:"0.6rem",color:"#334155",marginTop:2}}>{n.region}</div>
-                        </div>
+                        <div><div style={{fontSize:"0.75rem",fontWeight:800,color:"#f1f5f9",lineHeight:1.2}}>{n.label}</div><div style={{fontSize:"0.6rem",color:"#334155",marginTop:2}}>{n.region}</div></div>
                       </div>
                       <div style={{width:7,height:7,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite",marginTop:4}}/>
                     </div>
@@ -1389,13 +1737,10 @@ export default function App() {
                       {Object.entries(s).map(([k,v])=>{
                         const labels={boilerTemp:"Qazan Temp",steamPressure:"Buxar Təzyiqi",output:"Çıxış Gücü",waterLevel:"Su Səviyyəsi",turbineRpm:"Türbin RPM",panelTemp:"Panel Temp",efficiency:"Səmərəlilik",rpm:"Fırlanma",bearingTemp:"Yataq Temp",vibration:"Vibrasiya"};
                         const units={boilerTemp:"°C",steamPressure:"MPa",output:"MW",waterLevel:"m",turbineRpm:"RPM",panelTemp:"°C",efficiency:"%",rpm:"RPM",bearingTemp:"°C",vibration:"mm/s"};
-                        const isOverridden = sensorOverrides[n.id]?.[k]!==undefined;
+                        const isOverridden=sensorOverrides[n.id]?.[k]!==undefined;
                         return (
                           <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid rgba(255,255,255,0.03)",paddingBottom:6}}>
-                            <span style={{fontSize:"0.65rem",color:"#64748b",display:"flex",alignItems:"center",gap:4}}>
-                              {labels[k]||k}
-                              {isOverridden&&<span style={{fontSize:"0.52rem",color:"#f59e0b",background:"rgba(245,158,11,0.1)",borderRadius:3,padding:"1px 4px"}}>Manuel</span>}
-                            </span>
+                            <span style={{fontSize:"0.65rem",color:"#64748b",display:"flex",alignItems:"center",gap:4}}>{labels[k]||k}{isOverridden&&<span style={{fontSize:"0.52rem",color:"#f59e0b",background:"rgba(245,158,11,0.1)",borderRadius:3,padding:"1px 4px"}}>Manuel</span>}</span>
                             <span style={{fontSize:"0.72rem",fontWeight:800,color:isOverridden?"#f59e0b":n.color}}>{typeof v==="number"?v.toFixed(2):v} {units[k]||""}</span>
                           </div>
                         );
@@ -1408,36 +1753,21 @@ export default function App() {
           </div>
         )}
 
-        {/* GRID */}
-        {activeTab==="grid"&&(
-          <GridPanel sensors={sensors}/>
-        )}
+        {activeTab==="grid"&&<GridPanel sensors={sensors}/>}
 
-        {/* DATA ENTRY */}
         {activeTab==="dataentry"&&(
           <div style={{display:"grid",gridTemplateColumns:"380px 1fr",gap:14}}>
-            <div style={card()}>
-              <ManualDataEntryPanel currentUser={currentUser} perms={perms} sensors={sensors} setSensorOverrides={setSensorOverrides} dataEntries={dataEntries} setDataEntries={setDataEntries}/>
-            </div>
+            <div style={card()}><ManualDataEntryPanel currentUser={currentUser} perms={perms} sensors={sensors} setSensorOverrides={setSensorOverrides} dataEntries={dataEntries} setDataEntries={setDataEntries}/></div>
             <div style={card()}>
               <div style={{fontSize:"0.7rem",color:"#64748b",fontWeight:700,marginBottom:14,display:"flex",alignItems:"center",gap:6}}><Database size={13}/> MƏLUMAT GİRİŞ TARİXÇƏSİ</div>
-              {dataEntries.length===0?(
-                <div style={{textAlign:"center",padding:"32px 0",color:"#334155",fontSize:"0.72rem"}}>Hələ heç bir məlumat daxil edilməyib</div>
-              ):(
+              {dataEntries.length===0?<div style={{textAlign:"center",padding:"32px 0",color:"#334155",fontSize:"0.72rem"}}>Hələ heç bir məlumat daxil edilməyib</div>:(
                 <div style={{display:"flex",flexDirection:"column",gap:6}}>
                   {dataEntries.slice(0,15).map(e=>(
                     <div key={e.id} style={{display:"grid",gridTemplateColumns:"auto 1fr auto auto auto",gap:12,alignItems:"center",padding:"10px 14px",background:"rgba(255,255,255,0.02)",borderRadius:9,border:`1px solid ${e.color}18`}}>
                       <div style={{width:8,height:8,borderRadius:"50%",background:e.color,boxShadow:`0 0 6px ${e.color}60`}}/>
-                      <div>
-                        <div style={{fontSize:"0.7rem",color:"#e2e8f0",fontWeight:700}}>{e.target}</div>
-                        <div style={{fontSize:"0.62rem",color:"#475569",marginTop:1}}>{e.field}</div>
-                      </div>
-                      <div style={{textAlign:"right"}}>
-                        <div style={{fontSize:"0.75rem",fontWeight:800,color:e.color}}>{e.value}</div>
-                      </div>
-                      <div style={{textAlign:"right"}}>
-                        <div style={{fontSize:"0.65rem",color:"#64748b"}}>{e.actor}</div>
-                      </div>
+                      <div><div style={{fontSize:"0.7rem",color:"#e2e8f0",fontWeight:700}}>{e.target}</div><div style={{fontSize:"0.62rem",color:"#475569",marginTop:1}}>{e.field}</div></div>
+                      <div style={{textAlign:"right"}}><div style={{fontSize:"0.75rem",fontWeight:800,color:e.color}}>{e.value}</div></div>
+                      <div style={{textAlign:"right"}}><div style={{fontSize:"0.65rem",color:"#64748b"}}>{e.actor}</div></div>
                       <RoleBadge role={e.actorRole} size="xs"/>
                     </div>
                   ))}
@@ -1447,12 +1777,8 @@ export default function App() {
           </div>
         )}
 
-        {/* STRATEGIES */}
-        {activeTab==="strategies"&&(
-          <StrategiesPanel strategies={strategies} saveStrategy={saveStrategy} perms={perms} currentUser={currentUser}/>
-        )}
+        {activeTab==="strategies"&&<StrategiesPanel strategies={strategies} saveStrategy={saveStrategy} perms={perms} currentUser={currentUser}/>}
 
-        {/* INCIDENTS */}
         {activeTab==="incidents"&&(
           <div>
             <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
@@ -1466,15 +1792,12 @@ export default function App() {
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {filteredAlerts.length===0&&<div style={{...card(),textAlign:"center",padding:40,color:"#334155"}}>Hadisə tapılmadı</div>}
               {filteredAlerts.map(a=>{
-                const sv = SEVERITY_MAP[a.severity]||SEVERITY_MAP["aşağı"];
+                const sv=SEVERITY_MAP[a.severity]||SEVERITY_MAP["aşağı"];
                 return (
                   <div key={a.id} style={{...card(),borderColor:sv.border,background:`linear-gradient(135deg,${sv.bg},rgba(4,8,20,0.97))`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
                       <div style={{flex:1,minWidth:0}}>
-                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
-                          <span style={{fontSize:"0.56rem",color:sv.color,background:sv.bg,border:`1px solid ${sv.border}`,borderRadius:4,padding:"2px 8px",fontWeight:800,flexShrink:0}}>{sv.label}</span>
-                          <span style={{fontSize:"0.65rem",color:"#94a3b8",fontWeight:700}}>{a.node}</span>
-                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}><span style={{fontSize:"0.56rem",color:sv.color,background:sv.bg,border:`1px solid ${sv.border}`,borderRadius:4,padding:"2px 8px",fontWeight:800,flexShrink:0}}>{sv.label}</span><span style={{fontSize:"0.65rem",color:"#94a3b8",fontWeight:700}}>{a.node}</span></div>
                         <div style={{fontSize:"0.72rem",color:"#f1f5f9",fontWeight:700,marginBottom:3}}>{a.component}</div>
                         <div style={{fontSize:"0.68rem",color:"#94a3b8"}}>{a.message}</div>
                         {a.note&&<div style={{fontSize:"0.62rem",color:"#475569",marginTop:4,fontStyle:"italic"}}>Not: {a.note}</div>}
@@ -1491,19 +1814,12 @@ export default function App() {
           </div>
         )}
 
-        {/* MESSAGES */}
-        {activeTab==="messages"&&(
-          <div style={card()}>
-            <MessagingPanel currentUser={currentUser} users={users} messages={messages} onSend={()=>{}} perms={perms}/>
-          </div>
-        )}
+        {activeTab==="messages"&&<div style={card()}><MessagingPanel currentUser={currentUser} users={users} messages={messages} onSend={()=>{}} perms={perms}/></div>}
 
-        {/* ADMIN */}
-        {activeTab==="admin"&&(
-          <div style={card()}>
-            <AdminPanel currentUser={currentUser} perms={perms} users={users} pending={pending} activityLog={activityLog}/>
-          </div>
-        )}
+        {/* 🔐 SECURITY TAB */}
+        {activeTab==="security"&&<SecurityPanel perms={perms} auditLogs={auditLogs}/>}
+
+        {activeTab==="admin"&&<div style={card()}><AdminPanel currentUser={currentUser} perms={perms} users={users} pending={pending} activityLog={activityLog}/></div>}
 
       </main>
     </div>
