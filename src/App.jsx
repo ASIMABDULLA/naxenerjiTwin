@@ -26,15 +26,10 @@ const SUPABASE_URL = "https://psvobvcuczallzmyqnjm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBzdm9idmN1Y3phbGx6bXlxbmptIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE3NTEwNzAsImV4cCI6MjA4NzMyNzA3MH0.94u6a0xpU3mNei4BsBxzWYIP2TDmHfP6TaXmETgp3zY";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// ═══════════════════════════════════════════════════════════════
-// 🔐 TƏHLÜKƏSİZLİK MODULİ
-// ═══════════════════════════════════════════════════════════════
-
-// ── RATE LIMITING ───────────────────────────────────────────────
 const RATE_LIMIT = {
   MAX_ATTEMPTS: 5,
-  BLOCK_DURATION: 15 * 60 * 1000, // 15 dəqiqə
-  WINDOW: 10 * 60 * 1000          // 10 dəqiqə pəncərəsi
+  BLOCK_DURATION: 15 * 60 * 1000,
+  WINDOW: 10 * 60 * 1000
 };
 
 class RateLimiter {
@@ -62,16 +57,15 @@ class RateLimiter {
 }
 const rateLimiter = new RateLimiter();
 
-// ── INPUT SANİTİZASİYASI ────────────────────────────────────────
 function sanitizeInput(str) {
   if (typeof str !== 'string') return str;
   return str
-    .replace(/[<>]/g, '')                    // XSS qarşısı
-    .replace(/['";\\]/g, '')                  // SQL injection qarşısı
-    .replace(/javascript:/gi, '')             // JS injection
-    .replace(/on\w+\s*=/gi, '')              // Event handler injection
+    .replace(/[<>]/g, '')
+    .replace(/['";\\]/g, '')
+    .replace(/javascript:/gi, '')
+    .replace(/on\w+\s*=/gi, '')
     .trim()
-    .slice(0, 512);                           // Uzunluq limiti
+    .slice(0, 512);
 }
 
 function sanitizeObject(obj) {
@@ -82,8 +76,7 @@ function sanitizeObject(obj) {
   return clean;
 }
 
-// ── SESSİYA İDARƏETMƏSİ ────────────────────────────────────────
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 dəqiqə
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
 function useSessionTimeout(currentUser, onLogout) {
   const lastActivity = useRef(Date.now());
@@ -113,7 +106,6 @@ function useSessionTimeout(currentUser, onLogout) {
   return { timeoutMs: SESSION_TIMEOUT_MS };
 }
 
-// ── AUDİT LOGLAMA ──────────────────────────────────────────────
 async function logAudit(params) {
   const { userId, userName, userRole, action, target, details, severity = 'info' } = params;
   try {
@@ -127,136 +119,23 @@ async function logAudit(params) {
       severity,
       created_at: new Date().toISOString()
     }]);
-  } catch (e) { /* audit log xətası kritik deyil */ }
+  } catch (e) { }
 }
 
-// ── TƏHLÜKƏSİZLİK PROTOKOLLARINın VƏZİYYƏTİ ──────────────────
 const SECURITY_PROTOCOLS = [
-  {
-    id: "https",
-    name: "HTTPS / TLS",
-    icon: Lock,
-    color: "#10b981",
-    status: "aktiv",
-    desc: "Bütün trafik TLS 1.3 ilə şifrələnir",
-    detail: "Supabase HTTPS endpoint vasitəsilə bütün API sorğuları şifrələnmiş kanaldan keçir. Man-in-the-middle hücumlarının qarşısı alınır.",
-    badge: "TLS 1.3"
-  },
-  {
-    id: "rls",
-    name: "RLS",
-    icon: Database,
-    color: "#10b981",
-    status: "aktiv",
-    desc: "Row Level Security aktivdir",
-    detail: "Hər istifadəçi yalnız öz icazəsi olan cədvəl sətirlərinə çata bilər. Supabase RLS siyasətləri server tərəfindən tətbiq edilir.",
-    badge: "Supabase"
-  },
-  {
-    id: "rbac",
-    name: "RBAC",
-    icon: ShieldCheck,
-    color: "#10b981",
-    status: "aktiv",
-    desc: "Admin, Müavin, Operator, Müşahidəçi",
-    detail: "4 səviyyəli rol strukturu. Hər əməliyyat əvvəlcə `getPerms()` ilə yoxlanılır. Yüksək imtiyazlı əməliyyatlar backend-də də doğrulanır.",
-    badge: "4 Rol"
-  },
-  {
-    id: "ratelimit",
-    name: "Rate Limiting",
-    icon: Ban,
-    color: "#10b981",
-    status: "aktiv",
-    desc: "Maksimum 5 cəhd / 10 dəqiqə",
-    detail: "Giriş cəhdlərini izləyir. 5 uğursuz cəhddən sonra hesab 15 dəqiqə bloklanır. Brute-force hücumlarının qarşısını alır.",
-    badge: "5 cəhd"
-  },
-  {
-    id: "auditlog",
-    name: "Audit Log",
-    icon: History,
-    color: "#10b981",
-    status: "aktiv",
-    desc: "Bütün əməliyyatlar qeydə alınır",
-    detail: "Giriş/çıxış, məlumat dəyişikliyi, strategiya əlavəsi, hadisə qeydiyyatı – hamısı `audit_logs` cədvəlində saxlanılır. Dəyişdirilə bilməz.",
-    badge: "Real vaxt"
-  },
-  {
-    id: "session",
-    name: "Sessiya İdarəetməsi",
-    icon: Clock,
-    color: "#10b981",
-    status: "aktiv",
-    desc: "30 dəqiqə qeyri-aktiv → avtomatik çıxış",
-    detail: "İstifadəçi 30 dəqiqə ərzində heç bir əməliyyat etmədikdə sessiyanı avtomatik sonlandırır. Token müddəti nəzarət altındadır.",
-    badge: "30 dəq"
-  },
-  {
-    id: "sanitize",
-    name: "Input Sanitization",
-    icon: ShieldAlert,
-    color: "#10b981",
-    status: "aktiv",
-    desc: "XSS və SQL injection qarşısı",
-    detail: "Bütün istifadəçi girişləri veritabanına yazılmazdan əvvəl `sanitizeInput()` funksiyasından keçirilir. HTML teqləri, JS kodları, SQL xüsusi simvolları təmizlənir.",
-    badge: "Aktiv"
-  },
-  {
-    id: "vpn",
-    name: "VPN",
-    icon: Network,
-    color: "#f59e0b",
-    status: "planlanir",
-    desc: "Qorunan şəbəkə inteqrasiyası",
-    detail: "Sistemə yalnız korporativ VPN üzərindən giriş. WireGuard/OpenVPN inteqrasiyası produksiya mərhələsində aktiv ediləcək.",
-    badge: "Tezliklə"
-  },
-  {
-    id: "firewall",
-    name: "Firewall",
-    icon: Server,
-    color: "#f59e0b",
-    status: "planlanir",
-    desc: "Supabase şəbəkə qaydaları",
-    detail: "Supabase-in daxili şəbəkə firewall-u aktiv. Özel IP allowlist produksiya mərhələsində konfiqurasiya ediləcək.",
-    badge: "Tezliklə"
-  },
-  {
-    id: "2fa",
-    name: "2FA",
-    icon: Fingerprint,
-    color: "#f59e0b",
-    status: "planlanir",
-    desc: "İki mərhələli giriş",
-    detail: "TOTP əsaslı 2FA (Google Authenticator, Authy). Supabase Auth MFA inteqrasiyası planlanır. Xüsusilə admin/operator rolları üçün məcburi ediləcək.",
-    badge: "Tezliklə"
-  },
-  {
-    id: "ddos",
-    name: "DDoS Qorunma",
-    icon: Globe,
-    color: "#f59e0b",
-    status: "planlanir",
-    desc: "Cloudflare WAF inteqrasiyası",
-    detail: "Cloudflare Pro/Business vasitəsilə L3/L4/L7 DDoS qorunması. Anomal trafik avtomatik bloklanır. Produksiya mərhələsində aktiv ediləcək.",
-    badge: "Tezliklə"
-  },
-  {
-    id: "opcua",
-    name: "OPC-UA",
-    icon: Wifi,
-    color: "#64748b",
-    status: "inteqrasiya",
-    desc: "Sənaye cihaz inteqrasiyası",
-    detail: "IEC 62541 standartına uyğun şifrələnmiş OPC-UA protokolu. X.509 sertifikatlar ilə cihaz autentifikasiyası. Stansiya avadanlıqları ilə güvənli əlaqə.",
-    badge: "Hazırlanır"
-  }
+  { id:"https", name:"HTTPS / TLS", icon:Lock, color:"#10b981", status:"aktiv", desc:"Bütün trafik TLS 1.3 ilə şifrələnir", detail:"Supabase HTTPS endpoint vasitəsilə bütün API sorğuları şifrələnmiş kanaldan keçir. Man-in-the-middle hücumlarının qarşısı alınır.", badge:"TLS 1.3" },
+  { id:"rls", name:"RLS", icon:Database, color:"#10b981", status:"aktiv", desc:"Row Level Security aktivdir", detail:"Hər istifadəçi yalnız öz icazəsi olan cədvəl sətirlərinə çata bilər. Supabase RLS siyasətləri server tərəfindən tətbiq edilir.", badge:"Supabase" },
+  { id:"rbac", name:"RBAC", icon:ShieldCheck, color:"#10b981", status:"aktiv", desc:"Admin, Müavin, Operator, Müşahidəçi", detail:"4 səviyyəli rol strukturu. Hər əməliyyat əvvəlcə `getPerms()` ilə yoxlanılır. Yüksək imtiyazlı əməliyyatlar backend-də də doğrulanır.", badge:"4 Rol" },
+  { id:"ratelimit", name:"Rate Limiting", icon:Ban, color:"#10b981", status:"aktiv", desc:"Maksimum 5 cəhd / 10 dəqiqə", detail:"Giriş cəhdlərini izləyir. 5 uğursuz cəhddən sonra hesab 15 dəqiqə bloklanır. Brute-force hücumlarının qarşısını alır.", badge:"5 cəhd" },
+  { id:"auditlog", name:"Audit Log", icon:History, color:"#10b981", status:"aktiv", desc:"Bütün əməliyyatlar qeydə alınır", detail:"Giriş/çıxış, məlumat dəyişikliyi, strategiya əlavəsi, hadisə qeydiyyatı – hamısı `audit_logs` cədvəlində saxlanılır. Dəyişdirilə bilməz.", badge:"Real vaxt" },
+  { id:"session", name:"Sessiya İdarəetməsi", icon:Clock, color:"#10b981", status:"aktiv", desc:"30 dəqiqə qeyri-aktiv → avtomatik çıxış", detail:"İstifadəçi 30 dəqiqə ərzində heç bir əməliyyat etmədikdə sessiyanı avtomatik sonlandırır. Token müddəti nəzarət altındadır.", badge:"30 dəq" },
+  { id:"sanitize", name:"Input Sanitization", icon:ShieldAlert, color:"#10b981", status:"aktiv", desc:"XSS və SQL injection qarşısı", detail:"Bütün istifadəçi girişləri veritabanına yazılmazdan əvvəl `sanitizeInput()` funksiyasından keçirilir. HTML teqləri, JS kodları, SQL xüsusi simvolları təmizlənir.", badge:"Aktiv" },
+  { id:"vpn", name:"VPN", icon:Network, color:"#f59e0b", status:"planlanir", desc:"Qorunan şəbəkə inteqrasiyası", detail:"Sistemə yalnız korporativ VPN üzərindən giriş. WireGuard/OpenVPN inteqrasiyası produksiya mərhələsində aktiv ediləcək.", badge:"Tezliklə" },
+  { id:"firewall", name:"Firewall", icon:Server, color:"#f59e0b", status:"planlanir", desc:"Supabase şəbəkə qaydaları", detail:"Supabase-in daxili şəbəkə firewall-u aktiv. Özel IP allowlist produksiya mərhələsində konfiqurasiya ediləcək.", badge:"Tezliklə" },
+  { id:"2fa", name:"2FA", icon:Fingerprint, color:"#f59e0b", status:"planlanir", desc:"İki mərhələli giriş", detail:"TOTP əsaslı 2FA (Google Authenticator, Authy). Supabase Auth MFA inteqrasiyası planlanır. Xüsusilə admin/operator rolları üçün məcburi ediləcək.", badge:"Tezliklə" },
+  { id:"ddos", name:"DDoS Qorunma", icon:Globe, color:"#f59e0b", status:"planlanir", desc:"Cloudflare WAF inteqrasiyası", detail:"Cloudflare Pro/Business vasitəsilə L3/L4/L7 DDoS qorunması. Anomal trafik avtomatik bloklanır. Produksiya mərhələsində aktiv ediləcək.", badge:"Tezliklə" },
+  { id:"opcua", name:"OPC-UA", icon:Wifi, color:"#64748b", status:"inteqrasiya", desc:"Sənaye cihaz inteqrasiyası", detail:"IEC 62541 standartına uyğun şifrələnmiş OPC-UA protokolu. X.509 sertifikatlar ilə cihaz autentifikasiyası. Stansiya avadanlıqları ilə güvənli əlaqə.", badge:"Hazırlanır" }
 ];
-
-// ═══════════════════════════════════════════════════════════════
-// DATA & CONSTANTS
-// ═══════════════════════════════════════════════════════════════
 
 const NODES = [
   { id:"naxModul",     label:"Naxçıvan Modul Elektrik Stansiyası",  region:"Naxçıvan Şəhər",  type:"thermal",  icon:Zap,         color:"#f97316", sensors:{boilerTemp:420,steamPressure:14.2,output:82.1},     deltas:{boilerTemp:[2,0.5],steamPressure:[0.2,0.5],output:[0.8,0.5]} },
@@ -392,10 +271,6 @@ function useSensors() {
   }, []);
   return data;
 }
-
-// ═══════════════════════════════════════════════════════════════
-// UI HELPERS
-// ═══════════════════════════════════════════════════════════════
 
 function RoleBadge({ role, size="sm" }) {
   const rd = ROLES_DEF.find(r=>r.id===role)||ROLES_DEF[3];
@@ -555,10 +430,6 @@ function EnergyChart({ data }) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════
-// SUPABASE HOOKS
-// ═══════════════════════════════════════════════════════════════
-
 function useSupabaseMessages() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -648,7 +519,6 @@ function useSupabaseStrategies() {
   return { strategies, setStrategies, loading };
 }
 
-// Audit logs hook
 function useAuditLogs() {
   const [auditLogs, setAuditLogs] = useState([]);
   useEffect(() => {
@@ -664,10 +534,6 @@ function useAuditLogs() {
   }, []);
   return auditLogs;
 }
-
-// ═══════════════════════════════════════════════════════════════
-// 🔐 TƏHLÜKƏSİZLİK PANELİ
-// ═══════════════════════════════════════════════════════════════
 
 function SecurityPanel({ perms, auditLogs }) {
   const [expanded, setExpanded] = useState(null);
@@ -686,12 +552,10 @@ function SecurityPanel({ perms, auditLogs }) {
   };
 
   const filteredAudit = auditFilter==="all" ? auditLogs : auditLogs.filter(l=>l.severity===auditFilter);
-
   const severityColor = { info:"#38bdf8", warning:"#f59e0b", error:"#ef4444", critical:"#dc2626" };
 
   return (
     <div>
-      {/* KPI */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12,marginBottom:20}}>
         {[
           {label:"Aktiv Protokol",   value:activeCount,      color:"#10b981", Icon:ShieldCheck},
@@ -708,9 +572,7 @@ function SecurityPanel({ perms, auditLogs }) {
           </div>
         ))}
       </div>
-
       <div style={{display:"grid",gridTemplateColumns:"1fr 420px",gap:14}}>
-        {/* Protocol cards */}
         <div>
           <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,letterSpacing:"0.08em",marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Shield size={12}/> TƏHLÜKƏSİZLİK PROTOKOLLARI</div>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -722,7 +584,6 @@ function SecurityPanel({ perms, auditLogs }) {
               return (
                 <div key={proto.id} style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:`1px solid ${proto.color}20`,borderRadius:12,overflow:"hidden",transition:"all 0.2s"}}>
                   <div onClick={()=>setExpanded(isExp?null:proto.id)} style={{padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
-                    {/* Protocol icon */}
                     <div style={{width:36,height:36,borderRadius:9,background:`${proto.color}12`,border:`1px solid ${proto.color}25`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
                       <ProtoIcon size={17} style={{color:proto.color}}/>
                     </div>
@@ -736,7 +597,6 @@ function SecurityPanel({ perms, auditLogs }) {
                       </div>
                       <div style={{fontSize:"0.65rem",color:"#475569"}}>{proto.desc}</div>
                     </div>
-                    {/* Live indicator for active */}
                     {proto.status==="aktiv"&&(
                       <div style={{display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
                         <div style={{width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite",boxShadow:"0 0 6px #10b98160"}}/>
@@ -754,8 +614,6 @@ function SecurityPanel({ perms, auditLogs }) {
             })}
           </div>
         </div>
-
-        {/* Audit log */}
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(56,189,248,0.12)",borderRadius:14,padding:16,flex:1}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
@@ -792,8 +650,6 @@ function SecurityPanel({ perms, auditLogs }) {
               })}
             </div>
           </div>
-
-          {/* Rate limit status */}
           <div style={{background:"linear-gradient(135deg,rgba(6,12,28,0.9),rgba(4,8,20,0.95))",border:"1px solid rgba(16,185,129,0.15)",borderRadius:14,padding:16}}>
             <div style={{fontSize:"0.65rem",color:"#64748b",fontWeight:700,marginBottom:12,display:"flex",alignItems:"center",gap:6}}><Ban size={11}/> RATE LIMITING STATUS</div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -819,10 +675,10 @@ function SecurityPanel({ perms, auditLogs }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PANELS (unchanged ones condensed)
+// MANUAL DATA ENTRY PANEL — "Hadisə" tabı əlavə edildi
 // ═══════════════════════════════════════════════════════════════
 
-function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides, dataEntries, setDataEntries }) {
+function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides, dataEntries, setDataEntries, addAlert }) {
   const [targetType, setTargetType] = useState("station");
   const [selectedStation, setStation] = useState("");
   const [selectedZone, setZone] = useState("");
@@ -832,12 +688,28 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
 
+  // Hadisə formu üçün state-lər
+  const [incStation, setIncStation] = useState("");
+  const [incComponent, setIncComponent] = useState("");
+  const [incSeverity, setIncSeverity] = useState("orta");
+  const [incMessage, setIncMessage] = useState("");
+  const [incNote, setIncNote] = useState("");
+  const [incSaved, setIncSaved] = useState(false);
+  const [incError, setIncError] = useState("");
+  const [incLoading, setIncLoading] = useState(false);
+
   const userArea = currentUser?.serviceArea || "";
   const isAllAccess = userArea === "Bütün Ərazilər" || perms.isAdmin || perms.isViceAdmin;
   const accessibleStations = NODES.filter(n => isAllAccess ? true : n.label === userArea || n.region === userArea);
   const accessibleZones = DIST_ZONES.filter(z => isAllAccess ? true : z.name === userArea || userArea.includes(z.name) || z.name.includes(userArea.replace(" Rayonu","").replace(" Şəhər","")));
   const stationOpts = accessibleStations.map(n=>({value:n.id, label:n.label, colorDot:n.color}));
   const zoneOpts = accessibleZones.map(z=>({value:z.name, label:z.name, colorDot:"#38bdf8"}));
+  const incStationOpts = NODES.map(n=>({value:n.label, label:n.label, colorDot:n.color}));
+  const severityOpts = [
+    {value:"yüksək", label:"Kritik", colorDot:"#ef4444"},
+    {value:"orta",   label:"Diqqət", colorDot:"#f59e0b"},
+    {value:"aşağı",  label:"Normal", colorDot:"#10b981"},
+  ];
   const selectedNode = NODES.find(n=>n.id===selectedStation);
   const sensorLabels = {boilerTemp:"Qazan Temperaturu (°C)",steamPressure:"Buxar Təzyiqi (MPa)",output:"Çıxış Gücü (MW)",waterLevel:"Su Səviyyəsi (m)",turbineRpm:"Türbin RPM",panelTemp:"Panel Temperaturu (°C)",efficiency:"Səmərəlilik (%)",rpm:"Fırlanma (RPM)",bearingTemp:"Yataq Temperaturu (°C)",vibration:"Vibrasiya (mm/s)"};
   const zoneFieldLabels = { load:"Yük (MW)", capacity:"Güc (MW)", health:"Sağlamlıq (%)" };
@@ -851,7 +723,6 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
     if (targetType==="grid" && (!selectedZone || !fieldKey || fieldValue==="")) { setError("Zonu, sahəni və dəyəri doldurun."); return; }
     const numVal = parseFloat(fieldValue);
     if (isNaN(numVal)) { setError("Dəyər rəqəm olmalıdır."); return; }
-    // 🔐 Input sanitization
     const cleanNote = sanitizeInput(note);
     if (targetType==="station") setSensorOverrides(prev=>({...prev,[selectedStation]:{...(prev[selectedStation]||{}),[fieldKey]:numVal}}));
     const label = targetType==="station" ? NODES.find(n=>n.id===selectedStation)?.label : selectedZone;
@@ -862,12 +733,34 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
       color:targetType==="station"?(NODES.find(n=>n.id===selectedStation)?.color||"#38bdf8"):"#38bdf8"
     }]);
     if (insertError) { setError("Məlumat qeydə alınmadı: "+insertError.message); return; }
-    // 🔐 Audit log
     await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:`Manuel məlumat daxiletmə: ${label} → ${fLabel} = ${numVal}`, target:label, severity:'info' });
     setFieldValue(""); setNote(""); setSaved(true); setTimeout(()=>setSaved(false), 2500);
   };
 
+  const handleIncidentSubmit = async () => {
+    setIncError("");
+    if (!incStation) { setIncError("Stansiyanı seçin."); return; }
+    if (!incComponent.trim()) { setIncError("Komponent adını daxil edin."); return; }
+    if (!incMessage.trim()) { setIncError("Hadisə mesajını daxil edin."); return; }
+    setIncLoading(true);
+    const cleanComponent = sanitizeInput(incComponent);
+    const cleanMessage = sanitizeInput(incMessage);
+    const cleanNote = sanitizeInput(incNote);
+    const { error: insertError } = await supabase.from('alerts').insert([{
+      station_name: incStation,
+      component: cleanComponent,
+      severity: incSeverity,
+      message: cleanMessage,
+      note: cleanNote
+    }]);
+    if (insertError) { setIncError("Hadisə qeydə alınmadı: "+insertError.message); setIncLoading(false); return; }
+    await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:`Yeni hadisə əlavə edildi: ${incStation} → ${cleanComponent}`, target:incStation, severity: incSeverity==="yüksək"?"error": incSeverity==="orta"?"warning":"info" });
+    setIncStation(""); setIncComponent(""); setIncMessage(""); setIncNote(""); setIncSeverity("orta");
+    setIncLoading(false); setIncSaved(true); setTimeout(()=>setIncSaved(false), 2500);
+  };
+
   if (!perms.canEnterData) return <PermissionBanner message="Məlumat daxil etmək üçün Operator və ya yuxarı hüquq lazımdır."/>;
+
   return (
     <div>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
@@ -876,28 +769,107 @@ function ManualDataEntryPanel({ currentUser, perms, sensors, setSensorOverrides,
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:4,fontSize:"0.56rem",color:"#10b981",background:"rgba(16,185,129,0.08)",border:"1px solid rgba(16,185,129,0.15)",borderRadius:4,padding:"2px 6px"}}><ShieldCheck size={8}/> Sanitizasiya Aktiv</div>
       </div>
       {!isAllAccess&&<div style={{background:"rgba(56,189,248,0.06)",border:"1px solid rgba(56,189,248,0.15)",borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:"0.66rem",color:"#7dd3fc",display:"flex",alignItems:"center",gap:6}}><Shield size={11}/> Xidmət sahəniz: <strong>{userArea}</strong></div>}
-      {saved&&<div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.25)",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:"0.72rem",color:"#34d399",display:"flex",alignItems:"center",gap:6}}><CheckCircle size={12}/> Məlumat uğurla qeydə alındı</div>}
-      {error&&<div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:"0.7rem",color:"#fca5a5"}}>{error}</div>}
+
+      {/* Tab seçimi — 3 tab */}
       <div style={{display:"flex",gap:6,marginBottom:14}}>
-        {[{k:"station",l:"Stansiya",Icon:Cpu},{k:"grid",l:"Şəbəkə Zonu",Icon:Activity}].map(({k,l,Icon})=>(
-          <button key={k} onClick={()=>{setTargetType(k);setFieldKey("");setStation("");setZone("");}} style={{flex:1,padding:"8px",borderRadius:8,border:`1px solid ${targetType===k?"rgba(56,189,248,0.4)":"rgba(56,189,248,0.1)"}`,background:targetType===k?"rgba(56,189,248,0.12)":"transparent",color:targetType===k?"#38bdf8":"#475569",cursor:"pointer",fontSize:"0.68rem",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}><Icon size={12}/>{l}</button>
+        {[
+          {k:"station",   l:"Stansiya",    Icon:Cpu},
+          {k:"grid",      l:"Şəbəkə Zonu", Icon:Activity},
+          {k:"incident",  l:"Hadisə",      Icon:AlertTriangle}
+        ].map(({k,l,Icon})=>(
+          <button key={k} onClick={()=>{setTargetType(k);setFieldKey("");setStation("");setZone("");setError("");setIncError("");}} style={{
+            flex:1,padding:"8px",borderRadius:8,
+            border:`1px solid ${targetType===k?(k==="incident"?"rgba(239,68,68,0.45)":"rgba(56,189,248,0.4)"):(k==="incident"?"rgba(239,68,68,0.15)":"rgba(56,189,248,0.1)")}`,
+            background:targetType===k?(k==="incident"?"rgba(239,68,68,0.12)":"rgba(56,189,248,0.12)"):"transparent",
+            color:targetType===k?(k==="incident"?"#ef4444":"#38bdf8"):"#475569",
+            cursor:"pointer",fontSize:"0.68rem",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:5
+          }}><Icon size={12}/>{l}</button>
         ))}
       </div>
-      <div style={{display:"flex",flexDirection:"column",gap:10}}>
-        {targetType==="station"?(
-          <><DarkSelect value={selectedStation} onChange={v=>{setStation(v);setFieldKey("");}} options={stationOpts} placeholder="Stansiyanı seçin"/>
-          {selectedStation&&<DarkSelect value={fieldKey} onChange={setFieldKey} options={stationFieldOpts} placeholder="Sensor sahəsini seçin"/>}</>
-        ):(
-          <><DarkSelect value={selectedZone} onChange={v=>{setZone(v);setFieldKey("");}} options={zoneOpts} placeholder="Zonu seçin"/>
-          {selectedZone&&<DarkSelect value={fieldKey} onChange={setFieldKey} options={zoneFieldOpts} placeholder="Sahəni seçin"/>}</>
-        )}
-        {fieldKey&&(<>
-          <input type="number" step="0.01" placeholder="Yeni dəyər" value={fieldValue} onChange={e=>setFieldValue(e.target.value)} style={inp}/>
-          <textarea placeholder="Qeyd (ixtiyari)" value={note} onChange={e=>setNote(e.target.value)} rows={2} style={{...inp,resize:"none"}}/>
-          <button onClick={handleSubmit} style={{padding:"10px",borderRadius:9,background:"linear-gradient(135deg,rgba(56,189,248,0.18),rgba(14,165,233,0.1))",border:"1px solid rgba(56,189,248,0.35)",color:"#38bdf8",fontWeight:800,fontSize:"0.76rem",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><Save size={13}/> Yadda Saxla</button>
-        </>)}
-      </div>
-      {dataEntries.length>0&&(
+
+      {/* Stansiya / Şəbəkə formu */}
+      {(targetType==="station"||targetType==="grid")&&(
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {saved&&<div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.25)",borderRadius:8,padding:"8px 12px",fontSize:"0.72rem",color:"#34d399",display:"flex",alignItems:"center",gap:6}}><CheckCircle size={12}/> Məlumat uğurla qeydə alındı</div>}
+          {error&&<div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:8,padding:"8px 12px",fontSize:"0.7rem",color:"#fca5a5"}}>{error}</div>}
+          {targetType==="station"?(
+            <><DarkSelect value={selectedStation} onChange={v=>{setStation(v);setFieldKey("");}} options={stationOpts} placeholder="Stansiyanı seçin"/>
+            {selectedStation&&<DarkSelect value={fieldKey} onChange={setFieldKey} options={stationFieldOpts} placeholder="Sensor sahəsini seçin"/>}</>
+          ):(
+            <><DarkSelect value={selectedZone} onChange={v=>{setZone(v);setFieldKey("");}} options={zoneOpts} placeholder="Zonu seçin"/>
+            {selectedZone&&<DarkSelect value={fieldKey} onChange={setFieldKey} options={zoneFieldOpts} placeholder="Sahəni seçin"/>}</>
+          )}
+          {fieldKey&&(<>
+            <input type="number" step="0.01" placeholder="Yeni dəyər" value={fieldValue} onChange={e=>setFieldValue(e.target.value)} style={inp}/>
+            <textarea placeholder="Qeyd (ixtiyari)" value={note} onChange={e=>setNote(e.target.value)} rows={2} style={{...inp,resize:"none"}}/>
+            <button onClick={handleSubmit} style={{padding:"10px",borderRadius:9,background:"linear-gradient(135deg,rgba(56,189,248,0.18),rgba(14,165,233,0.1))",border:"1px solid rgba(56,189,248,0.35)",color:"#38bdf8",fontWeight:800,fontSize:"0.76rem",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><Save size={13}/> Yadda Saxla</button>
+          </>)}
+        </div>
+      )}
+
+      {/* ── YENİ: Hadisə formu ── */}
+      {targetType==="incident"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {incSaved&&<div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.25)",borderRadius:8,padding:"8px 12px",fontSize:"0.72rem",color:"#34d399",display:"flex",alignItems:"center",gap:6}}><CheckCircle size={12}/> Hadisə uğurla qeydə alındı və Hadisələr bölməsinə əlavə edildi</div>}
+          {incError&&<div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:8,padding:"8px 12px",fontSize:"0.7rem",color:"#fca5a5"}}>{incError}</div>}
+
+          <DarkSelect
+            value={incStation}
+            onChange={setIncStation}
+            options={incStationOpts}
+            placeholder="Stansiyanı seçin"
+            accentColor="#ef4444"
+          />
+          <input
+            placeholder="Komponent (məs: Transformer T-1, Qazanxana B-2)"
+            value={incComponent}
+            onChange={e=>setIncComponent(e.target.value)}
+            style={{...inp, border:"1px solid rgba(239,68,68,0.2)"}}
+          />
+          <DarkSelect
+            value={incSeverity}
+            onChange={setIncSeverity}
+            options={severityOpts}
+            placeholder="Ciddilik səviyyəsi"
+            accentColor="#ef4444"
+          />
+          <textarea
+            placeholder="Hadisə təsviri (nə baş verdi?)"
+            value={incMessage}
+            onChange={e=>setIncMessage(e.target.value)}
+            rows={3}
+            style={{...inp, resize:"none", border:"1px solid rgba(239,68,68,0.2)"}}
+          />
+          <textarea
+            placeholder="Əlavə qeyd (ixtiyari)"
+            value={incNote}
+            onChange={e=>setIncNote(e.target.value)}
+            rows={2}
+            style={{...inp, resize:"none"}}
+          />
+          <button onClick={handleIncidentSubmit} disabled={incLoading} style={{
+            padding:"10px",borderRadius:9,
+            background:"linear-gradient(135deg,rgba(239,68,68,0.18),rgba(220,38,38,0.1))",
+            border:"1px solid rgba(239,68,68,0.4)",color:"#ef4444",fontWeight:800,
+            fontSize:"0.76rem",cursor:incLoading?"not-allowed":"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+            opacity:incLoading?0.6:1
+          }}>
+            {incLoading?<RefreshCw size={13} style={{animation:"spin 1s linear infinite"}}/>:<><AlertTriangle size={13}/> Hadisəni Qeydə Al</>}
+          </button>
+
+          {/* Qısa məlumat */}
+          <div style={{background:"rgba(239,68,68,0.04)",border:"1px solid rgba(239,68,68,0.12)",borderRadius:8,padding:"10px 12px"}}>
+            <div style={{fontSize:"0.6rem",color:"#ef4444",fontWeight:700,marginBottom:5,display:"flex",alignItems:"center",gap:5}}><AlertTriangle size={9}/> QEYD</div>
+            <p style={{fontSize:"0.62rem",color:"#64748b",margin:0,lineHeight:1.6}}>
+              Qeydə alınan hadisə dərhal <strong style={{color:"#94a3b8"}}>Hadisələr</strong> bölməsində görünəcək və bütün aktiv istifadəçilərə real vaxtda çatdırılacaq.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Son dəyişikliklər — yalnız stansiya/grid tabında */}
+      {targetType!=="incident"&&dataEntries.length>0&&(
         <div style={{marginTop:18}}>
           <div style={{fontSize:"0.65rem",color:"#475569",fontWeight:700,marginBottom:10,display:"flex",alignItems:"center",gap:6}}><ClipboardList size={11}/> SON DƏYİŞİKLİKLƏR</div>
           <div style={{display:"flex",flexDirection:"column",gap:5,maxHeight:220,overflowY:"auto"}}>
@@ -1028,13 +1000,11 @@ function StrategiesPanel({ strategies, saveStrategy, perms, currentUser }) {
   const handleSave = async () => {
     if (!form.title) { setFormErr("Başlıq daxil edin."); return; }
     setSaving(true); setFormErr("");
-    // 🔐 Sanitize
     const cleanForm = sanitizeObject(form);
     const catColor = STRATEGY_CATEGORIES.find(c=>c.value===cleanForm.category)?.color||"#3b82f6";
     const priColor = PRIORITY_OPTS.find(p=>p.value===cleanForm.priority)?.color||"#f59e0b";
     const stColor  = STATUS_OPTS.find(s=>s.value===cleanForm.status)?.color||"#64748b";
     await saveStrategy({ ...cleanForm, categoryColor:catColor, priorityColor:priColor, statusColor:stColor });
-    // 🔐 Audit log
     await logAudit({ userId:currentUser.id, userName:currentUser.name, userRole:currentUser.role, action:`Yeni strategiya əlavə edildi: "${cleanForm.title}"`, target:"Strategiyalar", severity:'info' });
     setForm(emptyForm); setSaving(false); setShowForm(false);
   };
@@ -1248,7 +1218,6 @@ function AdminPanel({ currentUser, perms, users, pending, activityLog }) {
   );
 }
 
-// ─── AUTH SCREEN ─────────────────────────────────────────────────────────────
 function AuthScreen({ onLogin, onRegister }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
@@ -1273,7 +1242,6 @@ function AuthScreen({ onLogin, onRegister }) {
   const submit = async () => {
     setError(""); setLoading(true);
     if (mode==="login") {
-      // 🔐 Rate limiting check
       const rlKey = `login:${sanitizeInput(username)}`;
       const rl = rateLimiter.check(rlKey);
       if (!rl.allowed) {
@@ -1293,7 +1261,6 @@ function AuthScreen({ onLogin, onRegister }) {
       }
     } else {
       if (!username||!password||!name||!email||!serviceArea) { setError("Bütün sahələri doldurun."); setLoading(false); return; }
-      // 🔐 Sanitize all register fields
       const cleanData = sanitizeObject({ username, name, email, serviceArea, note });
       const res = await onRegister({ ...cleanData, password, requestedRole });
       if (res && res.error) { setError(res.error); setLoading(false); return; }
@@ -1320,7 +1287,6 @@ function AuthScreen({ onLogin, onRegister }) {
           <div style={{width:52,height:52,borderRadius:14,background:"linear-gradient(135deg,rgba(56,189,248,0.2),rgba(14,165,233,0.1))",border:"1px solid rgba(56,189,248,0.3)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 12px"}}><Zap size={26} style={{color:"#38bdf8"}}/></div>
           <h1 style={{color:"#f1f5f9",fontSize:"1.1rem",fontWeight:900,marginBottom:4}}>Naxçıvan Enerji İdarəetmə Sistemi</h1>
           <p style={{color:"#334155",fontSize:"0.7rem"}}>{mode==="login"?"Hesabınıza daxil olun":"Yeni hesab tələb edin"}</p>
-          {/* 🔐 Security status */}
           <div style={{display:"flex",justifyContent:"center",gap:8,marginTop:10,flexWrap:"wrap"}}>
             {[{Icon:Lock,label:"TLS 1.3",c:"#10b981"},{Icon:ShieldCheck,label:"RBAC",c:"#10b981"},{Icon:Ban,label:"Rate Limit",c:"#10b981"}].map(({Icon,label,c})=>(
               <span key={label} style={{fontSize:"0.52rem",color:c,background:`${c}10`,border:`1px solid ${c}20`,borderRadius:4,padding:"2px 7px",display:"inline-flex",alignItems:"center",gap:3}}><Icon size={7}/>{label}</span>
@@ -1342,7 +1308,6 @@ function AuthScreen({ onLogin, onRegister }) {
             <DarkSelect value={serviceArea} onChange={setArea} placeholder="Xidmət sahəsi seçin" grouped={groupedAreas}/>
             <textarea placeholder="Qeyd (ixtiyari)" value={note} onChange={e=>setNote(e.target.value)} rows={2} style={{...inp,resize:"none"}}/>
           </>}
-          {/* Rate limit warning */}
           {rateLimitInfo?.attemptsLeft&&(
             <div style={{fontSize:"0.67rem",color:"#f59e0b",background:"rgba(245,158,11,0.08)",border:"1px solid rgba(245,158,11,0.2)",borderRadius:7,padding:"8px 12px",display:"flex",alignItems:"center",gap:7}}>
               <AlertTriangle size={12}/> Xəbərdarlıq: Yalnız <strong>{rateLimitInfo.attemptsLeft}</strong> cəhdiniz qalır
@@ -1379,7 +1344,6 @@ function MessagingPanel({ currentUser, users, messages, onSend, perms }) {
   ];
   const handleSend = async () => {
     if (!subject||!body) return;
-    // 🔐 Sanitize
     const cleanSubj = sanitizeInput(subject);
     const cleanBody = sanitizeInput(body);
     const isBroadcast = recipient==="broadcast";
@@ -1445,10 +1409,6 @@ function MessagingPanel({ currentUser, users, messages, onSend, perms }) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ANA KOMPONENT
-// ═══════════════════════════════════════════════════════════════
-
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [users, setUsers] = useState([]);
@@ -1462,7 +1422,6 @@ export default function App() {
   const auditLogs = useAuditLogs();
   const [sensorOverrides, setSensorOverrides] = useState({});
 
-  // 🔐 Session timeout handler
   const handleLogout = useCallback(async (reason) => {
     if (currentUser) {
       if (reason === "session_timeout") {
@@ -1476,7 +1435,6 @@ export default function App() {
     setCurrentUser(null); setTab("overview");
   }, [currentUser]);
 
-  // 🔐 Session timeout
   useSessionTimeout(currentUser, handleLogout);
 
   useEffect(() => {
@@ -1530,14 +1488,12 @@ export default function App() {
     const userName = data.full_name||data.name||data.username;
     const user = {...data,id:data.id,name:userName,role:normalizedRole,serviceArea:data.service_region||"Bütün Ərazilər",avatar:userName.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()};
     setCurrentUser(user);
-    // 🔐 Audit log
     await logAudit({ userId:data.id, userName, userRole:normalizedRole, action:`Sistemə giriş: ${cleanUsername}`, target:"Auth", severity:'info' });
     return {ok:true};
   };
 
   const handleRegister = async (formData) => {
     try {
-      // 🔐 Sanitize
       const clean = sanitizeObject(formData);
       const {data:existing} = await supabase.from('users').select('id').eq('username',clean.username).maybeSingle();
       if (existing) return {error:"Bu istifadəçi adı artıq mövcuddur."};
@@ -1569,7 +1525,6 @@ export default function App() {
   const filteredAlerts = alerts.filter(a=>filterSev==="all"||a.severity===filterSev);
   const unreadMsgs = currentUser ? messages.filter(m=>(m.toId===currentUser.id||(m.type==="broadcast"&&m.fromId!==currentUser.id))&&!(m.readBy||[]).includes(currentUser.id)).length : 0;
   const perms = getPerms(currentUser);
-
   const activeSecurityCount = SECURITY_PROTOCOLS.filter(p=>p.status==="aktiv").length;
 
   if (!currentUser) return (
@@ -1614,7 +1569,6 @@ export default function App() {
         @keyframes securityPulse{0%,100%{box-shadow:0 0 0 0 rgba(16,185,129,0.3)}50%{box-shadow:0 0 0 4px rgba(16,185,129,0)}}
       `}</style>
 
-      {/* Header */}
       <header style={{background:"linear-gradient(90deg,rgba(2,6,16,0.95),rgba(4,8,22,0.95))",borderBottom:"1px solid rgba(56,189,248,0.1)",padding:"12px 20px",display:"flex",alignItems:"center",gap:16,position:"sticky",top:0,zIndex:100,backdropFilter:"blur(20px)"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0}}>
           <div style={{width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,rgba(56,189,248,0.2),rgba(14,165,233,0.1))",border:"1px solid rgba(56,189,248,0.3)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Zap size={20} style={{color:"#38bdf8"}}/></div>
@@ -1628,7 +1582,6 @@ export default function App() {
           <span style={{fontSize:"0.65rem",color:"#10b981",fontWeight:700}}>Aktiv</span>
           <span style={{fontSize:"0.65rem",color:"#334155",marginLeft:6}}>{totalOutput.toFixed(1)} MW / {totalCapacity} MW</span>
         </div>
-        {/* 🔐 Security status in header */}
         <SecurityBadge count={activeSecurityCount}/>
         <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4}}>
           <div style={{width:32,height:32,borderRadius:8,background:`${ROLES_DEF.find(r=>r.id===currentUser.role)?.color||"#64748b"}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.6rem",fontWeight:900,color:ROLES_DEF.find(r=>r.id===currentUser.role)?.color||"#64748b"}}>{currentUser.avatar}</div>
@@ -1640,7 +1593,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Nav */}
       <nav style={{background:"linear-gradient(90deg,rgba(2,6,14,0.9),rgba(3,8,20,0.9))",borderBottom:"1px solid rgba(56,189,248,0.08)",padding:"0 20px",display:"flex",gap:2,overflowX:"auto"}}>
         {TABS.map(({k,l,Icon,badge})=>(
           <button key={k} onClick={()=>setTab(k)} style={{padding:"10px 14px",border:"none",borderBottom:`2px solid ${activeTab===k?"#38bdf8":"transparent"}`,background:"transparent",color:activeTab===k?"#38bdf8":"#475569",cursor:"pointer",fontSize:"0.68rem",fontWeight:700,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6,transition:"all 0.2s",position:"relative"}}>
@@ -1652,7 +1604,6 @@ export default function App() {
 
       <main style={{padding:20,maxWidth:1400,margin:"0 auto"}}>
 
-        {/* OVERVIEW */}
         {activeTab==="overview"&&(
           <div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:14,marginBottom:20}}>
@@ -1668,7 +1619,6 @@ export default function App() {
                 </div>
               ))}
             </div>
-            {/* 🔐 Security summary strip */}
             <div style={{...card(),marginBottom:14,padding:"12px 18px"}}>
               <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
                 <div style={{display:"flex",alignItems:"center",gap:6}}><ShieldCheck size={14} style={{color:"#10b981"}}/><span style={{fontSize:"0.68rem",fontWeight:700,color:"#10b981"}}>Təhlükəsizlik Vəziyyəti</span></div>
@@ -1712,7 +1662,6 @@ export default function App() {
           </div>
         )}
 
-        {/* STATIONS */}
         {activeTab==="stations"&&(
           <div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
@@ -1756,8 +1705,18 @@ export default function App() {
         {activeTab==="grid"&&<GridPanel sensors={sensors}/>}
 
         {activeTab==="dataentry"&&(
-          <div style={{display:"grid",gridTemplateColumns:"380px 1fr",gap:14}}>
-            <div style={card()}><ManualDataEntryPanel currentUser={currentUser} perms={perms} sensors={sensors} setSensorOverrides={setSensorOverrides} dataEntries={dataEntries} setDataEntries={setDataEntries}/></div>
+          <div style={{display:"grid",gridTemplateColumns:"400px 1fr",gap:14}}>
+            <div style={card()}>
+              <ManualDataEntryPanel
+                currentUser={currentUser}
+                perms={perms}
+                sensors={sensors}
+                setSensorOverrides={setSensorOverrides}
+                dataEntries={dataEntries}
+                setDataEntries={setDataEntries}
+                addAlert={addAlert}
+              />
+            </div>
             <div style={card()}>
               <div style={{fontSize:"0.7rem",color:"#64748b",fontWeight:700,marginBottom:14,display:"flex",alignItems:"center",gap:6}}><Database size={13}/> MƏLUMAT GİRİŞ TARİXÇƏSİ</div>
               {dataEntries.length===0?<div style={{textAlign:"center",padding:"32px 0",color:"#334155",fontSize:"0.72rem"}}>Hələ heç bir məlumat daxil edilməyib</div>:(
@@ -1816,7 +1775,6 @@ export default function App() {
 
         {activeTab==="messages"&&<div style={card()}><MessagingPanel currentUser={currentUser} users={users} messages={messages} onSend={()=>{}} perms={perms}/></div>}
 
-        {/* 🔐 SECURITY TAB */}
         {activeTab==="security"&&<SecurityPanel perms={perms} auditLogs={auditLogs}/>}
 
         {activeTab==="admin"&&<div style={card()}><AdminPanel currentUser={currentUser} perms={perms} users={users} pending={pending} activityLog={activityLog}/></div>}
